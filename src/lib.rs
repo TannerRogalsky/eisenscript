@@ -1,10 +1,12 @@
 mod lexer;
 mod parser;
 
+type RulesMap = std::collections::BTreeMap<String, Rule>;
 pub type Lexer<'source> = logos::Lexer<'source, lexer::Token>;
+use itertools::Itertools;
 pub use parser::Parser;
 
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum Primitive {
     Box,
     Sphere,
@@ -17,58 +19,238 @@ pub enum Primitive {
     Other,
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
-pub struct Custom {
+impl Primitive {
+    pub fn name(&self) -> &str {
+        match self {
+            Primitive::Box => "box",
+            Primitive::Sphere => "sphere",
+            Primitive::Dot => "dot",
+            Primitive::Grid => "grid",
+            Primitive::Cylinder => "cyliner",
+            Primitive::Line => "line",
+            Primitive::Mesh => "mesh",
+            Primitive::Template => "template",
+            Primitive::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Custom {
     name: String,
     actions: Vec<Action>,
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
-pub enum RuleType {
-    Primitive(Primitive),
-    Custom(Custom),
-    // Ambiguous,
+impl Custom {
+    pub fn iter<'a>(
+        &'a self,
+        rules: &'a RulesMap,
+    ) -> impl Iterator<Item = (Transform, Primitive)> + 'a {
+        fn filter(action: &Action) -> Option<&TransformAction> {
+            match action {
+                Action::Set(_) => None,
+                Action::Transform(tx) => Some(tx),
+            }
+        }
+
+        self.actions
+            .iter()
+            .filter_map(filter)
+            .flat_map(move |action| {
+                let rule = rules.get(&action.rule).unwrap();
+                let result = action.iter().flat_map(move |tx| match &rule.ty {
+                    RuleType::Primitive(inner) => Box::new(std::iter::once((tx, *inner)))
+                        as Box<dyn Iterator<Item = (Transform, Primitive)>>,
+                    RuleType::Custom(inner) => Box::new(inner.iter(rules)),
+                    RuleType::Ambiguous(_) => unimplemented!(),
+                });
+                result
+            })
+    }
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
-pub struct Rule {
+#[derive(Debug, Clone, PartialEq)]
+struct Ambiguous {
+    name: String,
+    actions: Vec<(usize, Custom)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RuleType {
+    Primitive(Primitive),
+    Custom(Custom),
+    Ambiguous(Ambiguous),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Rule {
     pub max_depth: usize,
     pub ty: RuleType,
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
-pub struct Ruleset {
-    top_level: Custom,
-    rules: Vec<Rule>,
+impl Rule {
+    pub fn name(&self) -> &str {
+        match &self.ty {
+            RuleType::Primitive(inner) => inner.name(),
+            RuleType::Custom(inner) => &inner.name,
+            RuleType::Ambiguous(inner) => &inner.name,
+        }
+    }
 }
 
-impl Ruleset {
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleSet {
+    top_level: Custom,
+    rules: RulesMap,
+}
+
+impl RuleSet {
     pub fn new() -> Self {
+        let rules = std::array::IntoIter::new([
+            Primitive::Box,
+            Primitive::Sphere,
+            Primitive::Dot,
+            Primitive::Grid,
+            Primitive::Cylinder,
+            Primitive::Line,
+            Primitive::Mesh,
+            Primitive::Template,
+            Primitive::Other,
+        ])
+        .map(|p| {
+            (
+                p.name().to_string(),
+                Rule {
+                    max_depth: 0,
+                    ty: RuleType::Primitive(p),
+                },
+            )
+        })
+        .collect();
+
         Self {
             top_level: Custom {
                 name: "Top Level".to_string(),
                 actions: vec![],
             },
-            rules: vec![],
+            rules,
         }
     }
 
-    pub fn push(&mut self, rule: Rule) {
-        self.rules.push(rule);
+    fn add_action(&mut self, action: Action) {
+        self.top_level.actions.push(action);
+    }
+
+    fn push(&mut self, rule: Rule) {
+        use std::collections::btree_map::Entry;
+        match self.rules.entry(rule.name().to_string()) {
+            Entry::Vacant(entry) => {
+                entry.insert(rule);
+            }
+            Entry::Occupied(entry) => {
+                fn assert_custom(rule: Rule) -> Custom {
+                    match rule.ty {
+                        RuleType::Custom(inner) => inner,
+                        _ => panic!(),
+                    }
+                }
+
+                let (name, existing) = entry.remove_entry();
+                self.rules.insert(
+                    name,
+                    Rule {
+                        max_depth: 0,
+                        ty: RuleType::Ambiguous(Ambiguous {
+                            name: existing.name().to_string(),
+                            actions: vec![(0, assert_custom(existing)), (0, assert_custom(rule))],
+                        }),
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn iter(&self) -> RuleSetIterator {
+        RuleSetIterator::new(self)
     }
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
+pub struct RuleSetIterator<'a> {
+    iter: Box<dyn Iterator<Item = (Transform, Primitive)> + 'a>,
+}
+
+impl<'a> RuleSetIterator<'a> {
+    pub fn new(rules: &'a RuleSet) -> Self {
+        Self {
+            iter: Box::new(rules.top_level.iter(&rules.rules)),
+        }
+    }
+}
+
+impl Iterator for RuleSetIterator<'_> {
+    type Item = (Transform, Primitive);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialOrd, PartialEq)]
 pub struct Transform {
-    x: f32,
-    y: f32,
-    z: f32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
     rx: f32,
     ry: f32,
     rz: f32,
     sx: f32,
     sy: f32,
     sz: f32,
+}
+
+impl Transform {
+    pub fn translation(x: f32, y: f32, z: f32) -> Transform {
+        Self {
+            x,
+            y,
+            z,
+            ..Default::default()
+        }
+    }
+}
+
+impl std::ops::MulAssign for Transform {
+    fn mul_assign(&mut self, rhs: Self) {
+        self.x += rhs.x;
+        self.y += rhs.y;
+        self.z += rhs.z;
+    }
+}
+
+impl std::ops::MulAssign<f32> for Transform {
+    fn mul_assign(&mut self, rhs: f32) {
+        self.x *= rhs;
+        self.y *= rhs;
+        self.z *= rhs;
+    }
+}
+
+impl std::ops::Mul<f32> for Transform {
+    type Output = Self;
+
+    fn mul(mut self, rhs: f32) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl std::ops::Mul for Transform {
+    type Output = Self;
+
+    fn mul(mut self, rhs: Self) -> Self::Output {
+        self *= rhs;
+        self
+    }
 }
 
 impl Default for Transform {
@@ -87,14 +269,51 @@ impl Default for Transform {
     }
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
-pub struct TransformationLoop {
+#[derive(Debug, Clone, PartialEq)]
+struct TransformationLoop {
     count: usize,
     transform: Transform,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct TransformAction {
+    loops: Vec<TransformationLoop>,
+    rule: String,
+}
+
+impl TransformAction {
+    pub fn iter(&self) -> TransformActionIter {
+        let iter = if self.loops.is_empty() {
+            let iter = std::iter::once_with(|| vec![Transform::default()]);
+            Box::new(iter) as Box<dyn Iterator<Item = Vec<Transform>>>
+        } else {
+            let iter = self
+                .loops
+                .iter()
+                .map(|l| (1..=l.count).map(move |i| l.transform * i as f32));
+            Box::new(itertools::Itertools::multi_cartesian_product(iter))
+        };
+        TransformActionIter { iter }
+    }
+}
+
+struct TransformActionIter<'a> {
+    iter: Box<dyn Iterator<Item = Vec<Transform>> + 'a>,
+}
+
+impl Iterator for TransformActionIter<'_> {
+    type Item = Transform;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter
+            .next()
+            .and_then(|txs| txs.into_iter().fold1(|acc, tx| acc * tx))
+    }
+}
+
+#[allow(unused)]
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
-pub enum SetAction {
+enum SetAction {
     MaxDepth(usize),
     MaxObjects(usize),
     MinSize(f32),
@@ -104,19 +323,78 @@ pub enum SetAction {
     Background(String),
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
-pub enum Action {
+#[derive(Debug, Clone, PartialEq)]
+enum Action {
     Set(SetAction),
-    Transform {
-        loops: Vec<TransformationLoop>,
-        rule: String,
-    },
+    Transform(TransformAction),
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn from_fn() {
+        let action = TransformAction {
+            loops: vec![
+                TransformationLoop {
+                    count: 2,
+                    transform: Transform::translation(2., 0., 0.),
+                },
+                TransformationLoop {
+                    count: 2,
+                    transform: Transform::translation(0., 2., 0.),
+                },
+            ],
+            rule: "".to_string(),
+        };
+        let mut cmds = action.iter();
+
+        assert_eq!(cmds.next(), Some(Transform::translation(2., 2., 0.)));
+        assert_eq!(cmds.next(), Some(Transform::translation(2., 4., 0.)));
+        assert_eq!(cmds.next(), Some(Transform::translation(4., 2., 0.)));
+        assert_eq!(cmds.next(), Some(Transform::translation(4., 4., 0.)));
+        assert_eq!(cmds.next(), None);
+    }
+
+    #[test]
+    fn basic_tx() {
+        let rules = Parser::new(crate::Lexer::new("{ x 2 } box"))
+            .rules()
+            .unwrap();
+        let mut cmds = rules.iter();
+
+        assert_eq!(
+            cmds.next(),
+            Some((Transform::translation(2., 0., 0.), Primitive::Box))
+        );
+        assert_eq!(cmds.next(), None);
+    }
+
+    #[test]
+    fn basic_custom() {
+        let parser = Parser::new(crate::Lexer::new("r1 rule r1 { box }"))
+            .rules()
+            .unwrap();
+        let mut cmds = parser.iter();
+
+        assert_eq!(cmds.next(), Some((Transform::default(), Primitive::Box)));
+        assert_eq!(cmds.next(), None);
+    }
+
+    #[test]
+    fn custom_rule_lookup() {
+        const INPUT: &'static str = r#"
+3 * { x 2 h 40 } 2 * { y 2 h 40 } 4 * { z 2 h 40 } r1
+
+rule r1 {
+	box
+}
+"#;
+
+        let parser = Parser::new(crate::Lexer::new(INPUT));
+        let rules = parser.rules().unwrap();
+
+        assert_eq!(rules.iter().count(), 2 * 3 * 4);
     }
 }

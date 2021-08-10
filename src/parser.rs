@@ -29,10 +29,10 @@ impl<'source> Parser<'source> {
         Self { lexer }
     }
 
-    pub fn rules(&self) -> Result<crate::Ruleset, Error> {
+    pub fn rules(&self) -> Result<crate::RuleSet, Error> {
         let mut lexer = self.lexer.clone();
         let mut is_comment = false;
-        let mut rules = crate::Ruleset::new();
+        let mut rules = crate::RuleSet::new();
 
         while let Some(token) = lexer.next() {
             if is_comment && !matches!(token, Token::MultilineCommentEnd) {
@@ -57,14 +57,23 @@ impl<'source> Parser<'source> {
                         })
                         .count();
 
+                    fn starts_action(token: Token) -> bool {
+                        match token {
+                            Token::BracketOpen | Token::LiteralInteger | Token::RuleInvocation => {
+                                true
+                            }
+                            _ => false,
+                        }
+                    }
+
                     let mut actions = vec![];
                     let mut next = lexer.next().unwrap();
-                    while Self::starts_action(next) {
+                    while starts_action(next) {
                         let action = Self::parse_action_list(next, &mut lexer)?;
                         actions.push(action);
                         next = lexer.next().ok_or(Error::UnexpectedEOF)?;
                     }
-                    assert_eq!(Token::BracketClose, next);
+                    assert_eq!(Token::BracketClose, next, "{:?}", lexer.span());
                     rules.push(super::Rule {
                         max_depth: 0,
                         ty: super::RuleType::Custom(super::Custom { name, actions }),
@@ -84,20 +93,20 @@ impl<'source> Parser<'source> {
                         }
                         _ => Err(Error::ExpectedIdentifier),
                     }?;
-                    rules.top_level.actions.push(crate::Action::Set(set_action));
+                    rules.add_action(crate::Action::Set(set_action));
                 }
                 Token::RuleInvocation => {
                     let rule = lexer.slice().to_string();
-                    rules.top_level.actions.push(crate::Action::Transform {
+                    rules.add_action(crate::Action::Transform(crate::TransformAction {
                         loops: vec![],
                         rule,
-                    })
+                    }))
                 }
                 Token::LiteralInteger => {
-                    rules.top_level.actions.push(Self::parse_action_list(token, &mut lexer)?);
+                    rules.add_action(Self::parse_action_list(token, &mut lexer)?);
                 }
                 Token::BracketOpen => {
-                    rules.top_level.actions.push(Self::parse_action_list(token, &mut lexer)?);
+                    rules.add_action(Self::parse_action_list(token, &mut lexer)?);
                 }
                 _ => {
                     eprintln!("{:?}", lexer.span());
@@ -107,13 +116,6 @@ impl<'source> Parser<'source> {
         }
 
         Ok(rules)
-    }
-
-    fn starts_action(token: Token) -> bool {
-        match token {
-            Token::BracketOpen | Token::LiteralInteger => true,
-            _ => false,
-        }
     }
 
     fn parse_action_list(token: Token, lexer: &mut crate::Lexer) -> Result<crate::Action, Error> {
@@ -175,9 +177,16 @@ impl<'source> Parser<'source> {
             Ok(tx)
         }
 
+        fn starts_action(token: Token) -> bool {
+            match token {
+                Token::BracketOpen | Token::LiteralInteger => true,
+                _ => false,
+            }
+        }
+
         let mut token = token;
         let mut loops = vec![];
-        while Self::starts_action(token) {
+        while starts_action(token) {
             let count = match token {
                 Token::BracketOpen => 1,
                 Token::LiteralInteger => {
@@ -194,10 +203,10 @@ impl<'source> Parser<'source> {
             token = crate::Lexer::next(lexer).unwrap();
         }
         match token {
-            Token::RuleInvocation => Ok(crate::Action::Transform {
+            Token::RuleInvocation => Ok(crate::Action::Transform(crate::TransformAction {
                 loops,
                 rule: lexer.slice().to_string(),
-            }),
+            })),
             _ => Err(Error::ExpectedIdentifier),
         }
     }
@@ -208,19 +217,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
+    fn complex() {
         let parser = Parser::new(crate::Lexer::new(INPUT));
+        let rules = parser.rules();
+        assert!(rules.is_ok());
+    }
+
+    #[test]
+    fn rule_definition_single() {
+        let parser = Parser::new(crate::Lexer::new("rule r1 { box }"));
         let rules = parser.rules().unwrap();
-        println!("{:#?}", rules);
-        assert_eq!(rules.rules.len(), 3);
         assert_eq!(
             rules
-                .top_level
-                .actions
-                .iter()
-                .filter(|action| match action {
-                    crate::Action::Set(_) => true,
-                    crate::Action::Transform { .. } => false,
+                .rules
+                .values()
+                .filter(|rule| match &rule.ty {
+                    crate::RuleType::Primitive(_) => false,
+                    _ => true,
                 })
                 .count(),
             1
