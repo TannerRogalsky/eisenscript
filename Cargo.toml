@@ -12,3 +12,4 @@ itertools = "0.10"
 [dev-dependencies]
 solstice-2d = "0.2.13"
 glutin = "0.27"
+notify = "5.0.0-pre.11"

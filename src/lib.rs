@@ -4,7 +4,7 @@ mod parser;
 type RulesMap = std::collections::BTreeMap<String, Rule>;
 pub type Lexer<'source> = logos::Lexer<'source, lexer::Token>;
 use itertools::Itertools;
-pub use parser::Parser;
+pub use parser::{Error, Parser};
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum Primitive {
