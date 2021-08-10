@@ -4,7 +4,7 @@ mod parser;
 type RulesMap = std::collections::BTreeMap<String, Rule>;
 pub type Lexer<'source> = logos::Lexer<'source, lexer::Token>;
 use itertools::Itertools;
-pub use parser::{Error, Parser};
+pub use parser::{Error, ErrorKind, Parser};
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum Primitive {
@@ -200,12 +200,16 @@ pub struct Transform {
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    rx: f32,
-    ry: f32,
-    rz: f32,
-    sx: f32,
-    sy: f32,
-    sz: f32,
+    pub rx: f32,
+    pub ry: f32,
+    pub rz: f32,
+    pub sx: f32,
+    pub sy: f32,
+    pub sz: f32,
+    pub hue: f32,
+    pub sat: f32,
+    pub brightness: f32,
+    pub alpha: f32,
 }
 
 impl Transform {
@@ -217,6 +221,15 @@ impl Transform {
             ..Default::default()
         }
     }
+
+    pub fn hsv(hue: f32, sat: f32, brightness: f32) -> Transform {
+        Self {
+            hue,
+            sat,
+            brightness,
+            ..Default::default()
+        }
+    }
 }
 
 impl std::ops::MulAssign for Transform {
@@ -224,6 +237,11 @@ impl std::ops::MulAssign for Transform {
         self.x += rhs.x;
         self.y += rhs.y;
         self.z += rhs.z;
+
+        self.hue += rhs.hue;
+        self.sat *= rhs.sat;
+        self.brightness *= rhs.brightness;
+        self.alpha *= rhs.alpha;
     }
 }
 
@@ -232,6 +250,11 @@ impl std::ops::MulAssign<f32> for Transform {
         self.x *= rhs;
         self.y *= rhs;
         self.z *= rhs;
+
+        self.hue *= rhs;
+        // self.sat *= rhs;
+        // self.brightness *= rhs;
+        // self.alpha *= rhs;
     }
 }
 
@@ -265,6 +288,10 @@ impl Default for Transform {
             sx: 1.0,
             sy: 1.0,
             sz: 1.0,
+            hue: 0.0,
+            sat: 1.0,
+            brightness: 1.0,
+            alpha: 1.0,
         }
     }
 }
@@ -380,6 +407,18 @@ mod tests {
 
         assert_eq!(cmds.next(), Some((Transform::default(), Primitive::Box)));
         assert_eq!(cmds.next(), None);
+    }
+
+    #[test]
+    fn color_tx() {
+        let source = "6 * { h 72 } box";
+        let parser = Parser::new(crate::Lexer::new(source)).rules().unwrap();
+        let mut cmds = parser.iter();
+
+        assert_eq!(
+            cmds.next(),
+            Some((Transform::hsv(72., 1., 1.), Primitive::Box))
+        );
     }
 
     #[test]

@@ -1,25 +1,52 @@
 use crate::lexer::Token;
 
-#[derive(Debug)]
-pub enum Error {
+#[derive(Debug, Clone)]
+pub enum ErrorKind {
     UnexpectedEOF,
     ExpectedIdentifier,
     ExpectedNumber,
-    UnexpectedToken(String),
+    UnexpectedTransformToken,
+    UnexpectedTopLevelToken,
 }
 
-impl From<std::num::ParseIntError> for Error {
+impl std::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErrorKind::UnexpectedEOF => write!(f, "Unexpected end of file."),
+            ErrorKind::ExpectedIdentifier => write!(f, "Expected an identifier."),
+            ErrorKind::ExpectedNumber => write!(f, "Expected a number."),
+            ErrorKind::UnexpectedTransformToken => write!(f, "Unexpected transform parsing token."),
+            ErrorKind::UnexpectedTopLevelToken => write!(f, "Unexpected top level token."),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Error<'source> {
+    pub lexer: crate::Lexer<'source>,
+    pub kind: ErrorKind,
+}
+
+impl std::fmt::Display for Error<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let l = &self.lexer;
+        write!(f, "{} {:?} => {}", self.kind, l.span(), l.slice())
+    }
+}
+
+impl From<std::num::ParseIntError> for ErrorKind {
     fn from(_err: std::num::ParseIntError) -> Self {
-        Error::ExpectedNumber
+        ErrorKind::ExpectedNumber
     }
 }
 
-impl From<std::num::ParseFloatError> for Error {
+impl From<std::num::ParseFloatError> for ErrorKind {
     fn from(_err: std::num::ParseFloatError) -> Self {
-        Error::ExpectedNumber
+        ErrorKind::ExpectedNumber
     }
 }
 
+#[derive(Clone)]
 pub struct Parser<'source> {
     lexer: crate::Lexer<'source>,
 }
@@ -29,187 +56,194 @@ impl<'source> Parser<'source> {
         Self { lexer }
     }
 
-    pub fn rules(&self) -> Result<crate::RuleSet, Error> {
+    pub fn rules(&self) -> Result<crate::RuleSet, Error<'source>> {
         let mut lexer = self.lexer.clone();
-        let mut is_comment = false;
-        let mut rules = crate::RuleSet::new();
+        build_rules(&mut lexer).map_err(|kind| Error { lexer, kind })
+    }
+}
 
-        while let Some(token) = lexer.next() {
-            if is_comment && !matches!(token, Token::MultilineCommentEnd) {
-                continue;
-            }
+fn parse_action_list(token: Token, lexer: &mut crate::Lexer) -> Result<crate::Action, ErrorKind> {
+    fn parse_transform(lexer: &mut crate::Lexer) -> Result<crate::Transform, ErrorKind> {
+        let mut tx = crate::Transform::default();
 
+        fn get_number((token, slice): (Token, &str)) -> Result<f32, ErrorKind> {
             match token {
-                Token::MultilineCommentStart => {
-                    is_comment = true;
-                }
-                Token::MultilineCommentEnd => {
-                    is_comment = false;
-                }
-                Token::RuleDefinition => {
-                    let name = lexer.slice().trim_start_matches("rule ").to_string();
-
-                    // TODO: parse rule modifiers
-                    (&mut lexer)
-                        .take_while(|token| match token {
-                            Token::BracketOpen => false,
-                            _ => true,
-                        })
-                        .count();
-
-                    fn starts_action(token: Token) -> bool {
-                        match token {
-                            Token::BracketOpen | Token::LiteralInteger | Token::RuleInvocation => {
-                                true
-                            }
-                            _ => false,
-                        }
-                    }
-
-                    let mut actions = vec![];
-                    let mut next = lexer.next().unwrap();
-                    while starts_action(next) {
-                        let action = Self::parse_action_list(next, &mut lexer)?;
-                        actions.push(action);
-                        next = lexer.next().ok_or(Error::UnexpectedEOF)?;
-                    }
-                    assert_eq!(Token::BracketClose, next, "{:?}", lexer.span());
-                    rules.push(super::Rule {
-                        max_depth: 0,
-                        ty: super::RuleType::Custom(super::Custom { name, actions }),
-                    });
-                }
-                Token::Set => {
-                    let set_type = lexer.next().ok_or(Error::UnexpectedEOF)?;
-                    let set_action = match set_type {
-                        Token::MaxDepth => {
-                            let setting = lexer.next().ok_or(Error::UnexpectedEOF)?;
-                            if let Token::LiteralInteger = setting {
-                                let max_depth = lexer.slice().parse()?;
-                                Ok(crate::SetAction::MaxDepth(max_depth))
-                            } else {
-                                Err(Error::ExpectedNumber)
-                            }
-                        }
-                        _ => Err(Error::ExpectedIdentifier),
-                    }?;
-                    rules.add_action(crate::Action::Set(set_action));
-                }
-                Token::RuleInvocation => {
-                    let rule = lexer.slice().to_string();
-                    rules.add_action(crate::Action::Transform(crate::TransformAction {
-                        loops: vec![],
-                        rule,
-                    }))
-                }
-                Token::LiteralInteger => {
-                    rules.add_action(Self::parse_action_list(token, &mut lexer)?);
-                }
-                Token::BracketOpen => {
-                    rules.add_action(Self::parse_action_list(token, &mut lexer)?);
-                }
-                _ => {
-                    eprintln!("{:?}", lexer.span());
-                    return Err(Error::UnexpectedToken(lexer.slice().to_string()));
-                }
+                Token::LiteralInteger => Ok(slice.parse::<i32>()? as f32),
+                Token::LiteralFloat => Ok(slice.parse()?),
+                _ => Err(ErrorKind::ExpectedNumber),
             }
         }
 
-        Ok(rules)
+        fn next<'a>(lexer: &mut crate::Lexer<'a>) -> Result<(Token, &'a str), ErrorKind> {
+            crate::Lexer::next(lexer)
+                .ok_or(ErrorKind::UnexpectedEOF)
+                .map(|token| (token, lexer.slice()))
+        }
+
+        fn next_number(lexer: &mut crate::Lexer) -> Result<f32, ErrorKind> {
+            next(lexer).and_then(get_number)
+        }
+
+        while let Some(token) = crate::Lexer::next(lexer) {
+            match token {
+                Token::BracketClose => return Ok(tx),
+                Token::X => tx.x = next_number(lexer)?,
+                Token::Y => tx.y = next_number(lexer)?,
+                Token::Z => tx.z = next_number(lexer)?,
+                Token::Rx => tx.rx = next_number(lexer)?,
+                Token::Ry => tx.ry = next_number(lexer)?,
+                Token::Rz => tx.rz = next_number(lexer)?,
+                Token::S => {
+                    let s = next_number(lexer)?;
+                    let mut temp = lexer.clone();
+                    if let Ok(sy) = next_number(&mut temp) {
+                        let sz = next_number(&mut temp)?;
+                        tx.sx = s;
+                        tx.sy = sy;
+                        tx.sz = sz;
+                        std::mem::swap(lexer, &mut temp);
+                    } else {
+                        tx.sx = s;
+                        tx.sy = s;
+                        tx.sz = s;
+                    }
+                }
+                Token::Hue => {
+                    tx.hue = next_number(lexer)?;
+                }
+                Token::Sat => {
+                    tx.sat = next_number(lexer)?;
+                }
+                Token::Brightness => {
+                    tx.brightness = next_number(lexer)?;
+                }
+                Token::Alpha => {
+                    tx.alpha = next_number(lexer)?;
+                }
+                _ => return Err(ErrorKind::UnexpectedTransformToken),
+            }
+        }
+        Ok(tx)
     }
 
-    fn parse_action_list(token: Token, lexer: &mut crate::Lexer) -> Result<crate::Action, Error> {
-        fn parse_transform(lexer: &mut crate::Lexer) -> Result<crate::Transform, Error> {
-            let mut tx = crate::Transform::default();
-
-            fn get_number((token, slice): (Token, &str)) -> Result<f32, Error> {
-                match token {
-                    Token::LiteralInteger => Ok(slice.parse::<i32>()? as f32),
-                    Token::LiteralFloat => Ok(slice.parse()?),
-                    _ => Err(Error::ExpectedNumber),
-                }
-            }
-
-            fn next<'a>(lexer: &mut crate::Lexer<'a>) -> Result<(Token, &'a str), Error> {
-                crate::Lexer::next(lexer)
-                    .ok_or(Error::UnexpectedEOF)
-                    .map(|token| (token, lexer.slice()))
-            }
-
-            fn next_number(lexer: &mut crate::Lexer) -> Result<f32, Error> {
-                next(lexer).and_then(get_number)
-            }
-
-            while let Some(token) = crate::Lexer::next(lexer) {
-                match token {
-                    Token::BracketClose => return Ok(tx),
-                    Token::X => tx.x = next_number(lexer)?,
-                    Token::Y => tx.y = next_number(lexer)?,
-                    Token::Z => tx.z = next_number(lexer)?,
-                    Token::Rx => tx.rx = next_number(lexer)?,
-                    Token::Ry => tx.ry = next_number(lexer)?,
-                    Token::Rz => tx.rz = next_number(lexer)?,
-                    Token::S => {
-                        let s = next_number(lexer)?;
-                        let mut temp = lexer.clone();
-                        if let Ok(sy) = next_number(&mut temp) {
-                            let sz = next_number(&mut temp)?;
-                            tx.sx = s;
-                            tx.sy = sy;
-                            tx.sz = sz;
-                            std::mem::swap(lexer, &mut temp);
-                        } else {
-                            tx.sx = s;
-                            tx.sy = s;
-                            tx.sz = s;
-                        }
-                    }
-                    Token::Brightness | Token::Hue | Token::Sat | Token::Alpha => {
-                        let num = next(lexer).and_then(get_number)?;
-                        assert!(!num.is_nan());
-                    }
-                    _ => {
-                        eprintln!("{:?} => {:?}", lexer.slice(), lexer.span());
-                        unimplemented!()
-                    }
-                }
-            }
-            Ok(tx)
-        }
-
-        fn starts_action(token: Token) -> bool {
-            match token {
-                Token::BracketOpen | Token::LiteralInteger => true,
-                _ => false,
-            }
-        }
-
-        let mut token = token;
-        let mut loops = vec![];
-        while starts_action(token) {
-            let count = match token {
-                Token::BracketOpen => 1,
-                Token::LiteralInteger => {
-                    let count = std::str::FromStr::from_str(lexer.slice()).unwrap();
-                    assert_eq!(lexer.next(), Some(Token::Multiply));
-                    assert_eq!(lexer.next(), Some(Token::BracketOpen));
-                    count
-                }
-                _ => panic!(),
-            };
-            let transform = parse_transform(lexer).unwrap();
-            let tx_loop = crate::TransformationLoop { count, transform };
-            loops.push(tx_loop);
-            token = crate::Lexer::next(lexer).unwrap();
-        }
+    fn starts_action(token: Token) -> bool {
         match token {
-            Token::RuleInvocation => Ok(crate::Action::Transform(crate::TransformAction {
-                loops,
-                rule: lexer.slice().to_string(),
-            })),
-            _ => Err(Error::ExpectedIdentifier),
+            Token::BracketOpen | Token::LiteralInteger => true,
+            _ => false,
         }
     }
+
+    let mut token = token;
+    let mut loops = vec![];
+    while starts_action(token) {
+        let count = match token {
+            Token::BracketOpen => 1,
+            Token::LiteralInteger => {
+                let count = std::str::FromStr::from_str(lexer.slice()).unwrap();
+                assert_eq!(lexer.next(), Some(Token::Multiply));
+                assert_eq!(lexer.next(), Some(Token::BracketOpen));
+                count
+            }
+            _ => panic!(),
+        };
+        let transform = parse_transform(lexer)?;
+        let tx_loop = crate::TransformationLoop { count, transform };
+        loops.push(tx_loop);
+        token = crate::Lexer::next(lexer).unwrap();
+    }
+    match token {
+        Token::RuleInvocation => Ok(crate::Action::Transform(crate::TransformAction {
+            loops,
+            rule: lexer.slice().to_string(),
+        })),
+        _ => Err(ErrorKind::ExpectedIdentifier),
+    }
+}
+
+fn build_rules(lexer: &mut crate::Lexer) -> Result<crate::RuleSet, ErrorKind> {
+    let mut is_comment = false;
+    let mut rules = crate::RuleSet::new();
+
+    while let Some(token) = crate::Lexer::next(lexer) {
+        if is_comment && !matches!(token, Token::MultilineCommentEnd) {
+            continue;
+        }
+
+        match token {
+            Token::MultilineCommentStart => {
+                is_comment = true;
+            }
+            Token::MultilineCommentEnd => {
+                is_comment = false;
+            }
+            Token::RuleDefinition => {
+                let name = lexer.slice().trim_start_matches("rule ").to_string();
+
+                // TODO: parse rule modifiers
+                lexer
+                    .take_while(|token| match token {
+                        Token::BracketOpen => false,
+                        _ => true,
+                    })
+                    .count();
+
+                fn starts_action(token: Token) -> bool {
+                    match token {
+                        Token::BracketOpen | Token::LiteralInteger | Token::RuleInvocation => true,
+                        _ => false,
+                    }
+                }
+
+                let mut actions = vec![];
+                let mut next = crate::Lexer::next(lexer).ok_or(ErrorKind::UnexpectedEOF)?;
+                while starts_action(next) {
+                    let action = parse_action_list(next, lexer)?;
+                    actions.push(action);
+                    next = crate::Lexer::next(lexer).ok_or(ErrorKind::UnexpectedEOF)?;
+                }
+                assert_eq!(Token::BracketClose, next, "{:?}", lexer.span());
+                rules.push(super::Rule {
+                    max_depth: 0,
+                    ty: super::RuleType::Custom(super::Custom { name, actions }),
+                });
+            }
+            Token::Set => {
+                let set_type = crate::Lexer::next(lexer).ok_or(ErrorKind::UnexpectedEOF)?;
+                let set_action = match set_type {
+                    Token::MaxDepth => {
+                        let setting = crate::Lexer::next(lexer).ok_or(ErrorKind::UnexpectedEOF)?;
+                        if let Token::LiteralInteger = setting {
+                            let max_depth = lexer.slice().parse()?;
+                            Ok(crate::SetAction::MaxDepth(max_depth))
+                        } else {
+                            Err(ErrorKind::ExpectedNumber)
+                        }
+                    }
+                    _ => Err(ErrorKind::ExpectedIdentifier),
+                }?;
+                rules.add_action(crate::Action::Set(set_action));
+            }
+            Token::RuleInvocation => {
+                let rule = lexer.slice().to_string();
+                rules.add_action(crate::Action::Transform(crate::TransformAction {
+                    loops: vec![],
+                    rule,
+                }))
+            }
+            Token::LiteralInteger => {
+                rules.add_action(parse_action_list(token, lexer)?);
+            }
+            Token::BracketOpen => {
+                rules.add_action(parse_action_list(token, lexer)?);
+            }
+            Token::Error => {}
+            token @ _ => {
+                eprintln!("{:?}", token);
+                return Err(ErrorKind::UnexpectedTopLevelToken);
+            }
+        }
+    }
+    Ok(rules)
 }
 
 #[cfg(test)]
@@ -221,6 +255,15 @@ mod tests {
         let parser = Parser::new(crate::Lexer::new(INPUT));
         let rules = parser.rules();
         assert!(rules.is_ok());
+    }
+
+    #[test]
+    fn regression_001() {
+        let src = "//{ x 1 } box
+
+{ x -4.5 y -2 z 3 } 2 * { x 3 } 3 * { y 2 } 30 * { z -4 h 72 } box";
+        let parser = Parser::new(crate::Lexer::new(src));
+        let rules = parser.rules().unwrap_or();
     }
 
     #[test]
