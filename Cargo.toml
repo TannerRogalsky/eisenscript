@@ -8,8 +8,12 @@ edition = "2018"
 [dependencies]
 logos = "0.12"
 itertools = "0.10"
+nalgebra = { version = "0.29", features = ["convert-mint"] }
+mint = "0.5"
+approx = "0.5"
 
 [dev-dependencies]
-solstice-2d = "0.2.13"
+#solstice-2d = "0.2.13"
+solstice-2d = { path = "../solstice/solstice-2d" }
 glutin = "0.27"
 notify = "5.0.0-pre.11"

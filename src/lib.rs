@@ -175,6 +175,12 @@ impl RuleSet {
     }
 }
 
+impl Default for RuleSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct RuleSetIterator<'a> {
     iter: Box<dyn Iterator<Item = (Transform, Primitive)> + 'a>,
 }
@@ -197,15 +203,8 @@ impl Iterator for RuleSetIterator<'_> {
 
 #[derive(Debug, Copy, Clone, PartialOrd, PartialEq)]
 pub struct Transform {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub rx: f32,
-    pub ry: f32,
-    pub rz: f32,
-    pub sx: f32,
-    pub sy: f32,
-    pub sz: f32,
+    tx: nalgebra::Matrix4<f32>,
+
     pub hue: f32,
     pub sat: f32,
     pub brightness: f32,
@@ -215,9 +214,47 @@ pub struct Transform {
 impl Transform {
     pub fn translation(x: f32, y: f32, z: f32) -> Transform {
         Self {
-            x,
-            y,
-            z,
+            tx: nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(x, y, z)),
+            ..Default::default()
+        }
+    }
+
+    pub fn rotate_x(angle: f32) -> Transform {
+        let tx = nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0., 0.5, 0.5))
+            * nalgebra::Matrix4::from_axis_angle(&nalgebra::Vector3::x_axis(), angle.to_radians())
+            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0., -0.5, -0.5));
+        Self {
+            tx,
+            ..Default::default()
+        }
+    }
+
+    pub fn rotate_y(angle: f32) -> Transform {
+        let tx = nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.5, 0., 0.5))
+            * nalgebra::Matrix4::from_axis_angle(&nalgebra::Vector3::y_axis(), angle.to_radians())
+            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(-0.5, 0., -0.5));
+        Self {
+            tx,
+            ..Default::default()
+        }
+    }
+
+    pub fn rotate_z(angle: f32) -> Transform {
+        let tx = nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.5, 0.5, 0.))
+            * nalgebra::Matrix4::from_axis_angle(&nalgebra::Vector3::z_axis(), angle.to_radians())
+            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(-0.5, -0.5, 0.));
+        Self {
+            tx,
+            ..Default::default()
+        }
+    }
+
+    pub fn scale(x: f32, y: f32, z: f32) -> Transform {
+        let tx = nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.5, 0.5, 0.5))
+            * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(x, y, z))
+            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(-0.5, -0.5, -0.5));
+        Self {
+            tx,
             ..Default::default()
         }
     }
@@ -234,36 +271,12 @@ impl Transform {
 
 impl std::ops::MulAssign for Transform {
     fn mul_assign(&mut self, rhs: Self) {
-        self.x += rhs.x;
-        self.y += rhs.y;
-        self.z += rhs.z;
+        self.tx *= rhs.tx;
 
         self.hue += rhs.hue;
         self.sat *= rhs.sat;
         self.brightness *= rhs.brightness;
         self.alpha *= rhs.alpha;
-    }
-}
-
-impl std::ops::MulAssign<f32> for Transform {
-    fn mul_assign(&mut self, rhs: f32) {
-        self.x *= rhs;
-        self.y *= rhs;
-        self.z *= rhs;
-
-        self.hue *= rhs;
-        // self.sat *= rhs;
-        // self.brightness *= rhs;
-        // self.alpha *= rhs;
-    }
-}
-
-impl std::ops::Mul<f32> for Transform {
-    type Output = Self;
-
-    fn mul(mut self, rhs: f32) -> Self::Output {
-        self *= rhs;
-        self
     }
 }
 
@@ -279,20 +292,77 @@ impl std::ops::Mul for Transform {
 impl Default for Transform {
     fn default() -> Self {
         Self {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-            rx: 0.0,
-            ry: 0.0,
-            rz: 0.0,
-            sx: 1.0,
-            sy: 1.0,
-            sz: 1.0,
+            tx: nalgebra::Matrix4::identity(),
             hue: 0.0,
             sat: 1.0,
             brightness: 1.0,
             alpha: 1.0,
         }
+    }
+}
+
+impl From<Transform> for mint::ColumnMatrix4<f32> {
+    fn from(t: Transform) -> Self {
+        t.tx.into()
+    }
+}
+
+impl From<&Transform> for mint::ColumnMatrix4<f32> {
+    fn from(t: &Transform) -> Self {
+        t.tx.into()
+    }
+}
+
+impl approx::AbsDiffEq for Transform {
+    type Epsilon = f32;
+
+    fn default_epsilon() -> Self::Epsilon {
+        f32::EPSILON
+    }
+
+    fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
+        self.tx.abs_diff_eq(&other.tx, epsilon)
+            && self.hue.abs_diff_eq(&other.hue, epsilon)
+            && self.sat.abs_diff_eq(&other.sat, epsilon)
+            && self.brightness.abs_diff_eq(&other.brightness, epsilon)
+            && self.alpha.abs_diff_eq(&other.alpha, epsilon)
+    }
+}
+
+impl approx::RelativeEq for Transform {
+    fn default_max_relative() -> Self::Epsilon {
+        f32::default_max_relative()
+    }
+
+    fn relative_eq(
+        &self,
+        other: &Self,
+        epsilon: Self::Epsilon,
+        max_relative: Self::Epsilon,
+    ) -> bool {
+        self.tx.relative_eq(&other.tx, epsilon, max_relative)
+            && self.hue.relative_eq(&other.hue, epsilon, max_relative)
+            && self.sat.relative_eq(&other.sat, epsilon, max_relative)
+            && self
+                .brightness
+                .relative_eq(&other.brightness, epsilon, max_relative)
+            && self.alpha.relative_eq(&other.alpha, epsilon, max_relative)
+    }
+}
+
+impl approx::UlpsEq for Transform {
+    fn default_max_ulps() -> u32 {
+        f32::default_max_ulps()
+    }
+
+    fn ulps_eq(&self, other: &Self, epsilon: Self::Epsilon, max_ulps: u32) -> bool {
+        self.tx.ulps_eq(&other.tx, epsilon, max_ulps)
+            && self.hue.ulps_eq(&other.hue, epsilon, max_ulps)
+            && self.sat.ulps_eq(&other.sat, epsilon, max_ulps)
+            && self
+                .brightness
+                .ulps_eq(&other.brightness, epsilon, max_ulps)
+            && self.alpha.ulps_eq(&other.alpha, epsilon, max_ulps)
     }
 }
 
@@ -314,10 +384,12 @@ impl TransformAction {
             let iter = std::iter::once_with(|| vec![Transform::default()]);
             Box::new(iter) as Box<dyn Iterator<Item = Vec<Transform>>>
         } else {
-            let iter = self
-                .loops
-                .iter()
-                .map(|l| (1..=l.count).map(move |i| l.transform * i as f32));
+            let iter = self.loops.iter().map(|l| {
+                (1..=l.count).scan(Transform::default(), move |state, _| {
+                    *state *= l.transform;
+                    Some(*state)
+                })
+            });
             Box::new(itertools::Itertools::multi_cartesian_product(iter))
         };
         TransformActionIter { iter }
@@ -410,15 +482,36 @@ mod tests {
     }
 
     #[test]
-    fn color_tx() {
-        let source = "6 * { h 72 } box";
-        let parser = Parser::new(crate::Lexer::new(source)).rules().unwrap();
+    fn hue_tx() {
+        let count = 6;
+        let delta = 72.;
+
+        let source = format!("{} * {{ h {} }} box", count, delta);
+        let parser = Parser::new(crate::Lexer::new(&source)).rules().unwrap();
         let mut cmds = parser.iter();
 
-        assert_eq!(
-            cmds.next(),
-            Some((Transform::hsv(72., 1., 1.), Primitive::Box))
-        );
+        for i in 1..=count {
+            assert_eq!(
+                cmds.next(),
+                Some((Transform::hsv(delta * i as f32, 1., 1.), Primitive::Box))
+            );
+        }
+        assert_eq!(cmds.next(), None);
+    }
+
+    #[test]
+    fn rotation_test() {
+        let parser = Parser::new(crate::Lexer::new("2 * { x 1 rz 45 } box"))
+            .rules()
+            .unwrap();
+        let mut cmds = parser.iter().map(|(tx, _primitive)| tx);
+
+        let tx = Transform::translation(1., 0., 0.) * Transform::rotate_z(45.);
+        approx::assert_abs_diff_eq!(cmds.next().unwrap(), tx, epsilon = 0.001);
+        let tx = tx * Transform::translation(1., 0., 0.) * Transform::rotate_z(45.);
+        approx::assert_abs_diff_eq!(cmds.next().unwrap(), tx, epsilon = 0.001);
+
+        assert_eq!(cmds.next(), None);
     }
 
     #[test]

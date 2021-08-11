@@ -34,7 +34,6 @@ fn draw(source: &str) -> Result<solstice_2d::DrawList<'static>, eisenscript::Err
             _ => unimplemented!(),
         };
         let color = tx_to_color(&tx);
-        let tx = solstice_2d::Transform3D::translation(tx.x, tx.y, tx.z);
         dl.draw_with_color_and_transform(geometry, color, tx);
     }
     Ok(dl)

@@ -27,6 +27,12 @@ pub struct Error<'source> {
     pub kind: ErrorKind,
 }
 
+impl std::fmt::Debug for Error<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
 impl std::fmt::Display for Error<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let l = &self.lexer;
@@ -62,11 +68,20 @@ impl<'source> Parser<'source> {
     }
 }
 
+fn next(lexer: &mut crate::Lexer) -> Result<Token, ErrorKind> {
+    while let Some(token) = crate::Lexer::next(lexer) {
+        if !matches!(token, Token::Error) {
+            return Ok(token);
+        }
+    }
+    Err(ErrorKind::UnexpectedEOF)
+}
+
 fn parse_action_list(token: Token, lexer: &mut crate::Lexer) -> Result<crate::Action, ErrorKind> {
     fn parse_transform(lexer: &mut crate::Lexer) -> Result<crate::Transform, ErrorKind> {
         let mut tx = crate::Transform::default();
 
-        fn get_number((token, slice): (Token, &str)) -> Result<f32, ErrorKind> {
+        fn get_number(token: Token, slice: &str) -> Result<f32, ErrorKind> {
             match token {
                 Token::LiteralInteger => Ok(slice.parse::<i32>()? as f32),
                 Token::LiteralFloat => Ok(slice.parse()?),
@@ -74,39 +89,30 @@ fn parse_action_list(token: Token, lexer: &mut crate::Lexer) -> Result<crate::Ac
             }
         }
 
-        fn next<'a>(lexer: &mut crate::Lexer<'a>) -> Result<(Token, &'a str), ErrorKind> {
-            crate::Lexer::next(lexer)
-                .ok_or(ErrorKind::UnexpectedEOF)
-                .map(|token| (token, lexer.slice()))
-        }
-
         fn next_number(lexer: &mut crate::Lexer) -> Result<f32, ErrorKind> {
-            next(lexer).and_then(get_number)
+            next(lexer).and_then(|token| get_number(token, lexer.slice()))
         }
 
         while let Some(token) = crate::Lexer::next(lexer) {
             match token {
                 Token::BracketClose => return Ok(tx),
-                Token::X => tx.x = next_number(lexer)?,
-                Token::Y => tx.y = next_number(lexer)?,
-                Token::Z => tx.z = next_number(lexer)?,
-                Token::Rx => tx.rx = next_number(lexer)?,
-                Token::Ry => tx.ry = next_number(lexer)?,
-                Token::Rz => tx.rz = next_number(lexer)?,
+                Token::X => tx *= crate::Transform::translation(next_number(lexer)?, 0., 0.),
+                Token::Y => tx *= crate::Transform::translation(0., next_number(lexer)?, 0.),
+                Token::Z => tx *= crate::Transform::translation(0., 0., next_number(lexer)?),
+                Token::Rx => tx *= crate::Transform::rotate_x(next_number(lexer)?),
+                Token::Ry => tx *= crate::Transform::rotate_y(next_number(lexer)?),
+                Token::Rz => tx *= crate::Transform::rotate_z(next_number(lexer)?),
                 Token::S => {
                     let s = next_number(lexer)?;
                     let mut temp = lexer.clone();
-                    if let Ok(sy) = next_number(&mut temp) {
+                    let [x, y, z] = if let Ok(sy) = next_number(&mut temp) {
                         let sz = next_number(&mut temp)?;
-                        tx.sx = s;
-                        tx.sy = sy;
-                        tx.sz = sz;
                         std::mem::swap(lexer, &mut temp);
+                        [s, sy, sz]
                     } else {
-                        tx.sx = s;
-                        tx.sy = s;
-                        tx.sz = s;
-                    }
+                        [s, s, s]
+                    };
+                    tx *= crate::Transform::scale(x, y, z);
                 }
                 Token::Hue => {
                     tx.hue = next_number(lexer)?;
@@ -127,10 +133,7 @@ fn parse_action_list(token: Token, lexer: &mut crate::Lexer) -> Result<crate::Ac
     }
 
     fn starts_action(token: Token) -> bool {
-        match token {
-            Token::BracketOpen | Token::LiteralInteger => true,
-            _ => false,
-        }
+        matches!(token, Token::BracketOpen | Token::LiteralInteger)
     }
 
     let mut token = token;
@@ -149,7 +152,7 @@ fn parse_action_list(token: Token, lexer: &mut crate::Lexer) -> Result<crate::Ac
         let transform = parse_transform(lexer)?;
         let tx_loop = crate::TransformationLoop { count, transform };
         loops.push(tx_loop);
-        token = crate::Lexer::next(lexer).unwrap();
+        token = next(lexer)?;
     }
     match token {
         Token::RuleInvocation => Ok(crate::Action::Transform(crate::TransformAction {
@@ -181,25 +184,22 @@ fn build_rules(lexer: &mut crate::Lexer) -> Result<crate::RuleSet, ErrorKind> {
 
                 // TODO: parse rule modifiers
                 lexer
-                    .take_while(|token| match token {
-                        Token::BracketOpen => false,
-                        _ => true,
-                    })
+                    .take_while(|token| !matches!(token, Token::BracketOpen))
                     .count();
 
                 fn starts_action(token: Token) -> bool {
-                    match token {
-                        Token::BracketOpen | Token::LiteralInteger | Token::RuleInvocation => true,
-                        _ => false,
-                    }
+                    matches!(
+                        token,
+                        Token::BracketOpen | Token::LiteralInteger | Token::RuleInvocation
+                    )
                 }
 
                 let mut actions = vec![];
-                let mut next = crate::Lexer::next(lexer).ok_or(ErrorKind::UnexpectedEOF)?;
+                let mut next = self::next(lexer)?;
                 while starts_action(next) {
                     let action = parse_action_list(next, lexer)?;
                     actions.push(action);
-                    next = crate::Lexer::next(lexer).ok_or(ErrorKind::UnexpectedEOF)?;
+                    next = self::next(lexer)?;
                 }
                 assert_eq!(Token::BracketClose, next, "{:?}", lexer.span());
                 rules.push(super::Rule {
@@ -237,7 +237,7 @@ fn build_rules(lexer: &mut crate::Lexer) -> Result<crate::RuleSet, ErrorKind> {
                 rules.add_action(parse_action_list(token, lexer)?);
             }
             Token::Error => {}
-            token @ _ => {
+            token => {
                 eprintln!("{:?}", token);
                 return Err(ErrorKind::UnexpectedTopLevelToken);
             }
@@ -254,16 +254,7 @@ mod tests {
     fn complex() {
         let parser = Parser::new(crate::Lexer::new(INPUT));
         let rules = parser.rules();
-        assert!(rules.is_ok());
-    }
-
-    #[test]
-    fn regression_001() {
-        let src = "//{ x 1 } box
-
-{ x -4.5 y -2 z 3 } 2 * { x 3 } 3 * { y 2 } 30 * { z -4 h 72 } box";
-        let parser = Parser::new(crate::Lexer::new(src));
-        let rules = parser.rules().unwrap_or();
+        assert!(rules.is_ok(), "{:?}", rules);
     }
 
     #[test]
