@@ -7,6 +7,7 @@ pub enum ErrorKind {
     ExpectedNumber,
     UnexpectedTransformToken,
     UnexpectedTopLevelToken,
+    UnexpectedRuleDefinitionToken,
 }
 
 impl std::fmt::Display for ErrorKind {
@@ -17,6 +18,9 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::ExpectedNumber => write!(f, "Expected a number."),
             ErrorKind::UnexpectedTransformToken => write!(f, "Unexpected transform parsing token."),
             ErrorKind::UnexpectedTopLevelToken => write!(f, "Unexpected top level token."),
+            ErrorKind::UnexpectedRuleDefinitionToken => {
+                write!(f, "Unexpected rule definition token.")
+            }
         }
     }
 }
@@ -182,11 +186,49 @@ fn build_rules(lexer: &mut crate::Lexer) -> Result<crate::RuleSet, ErrorKind> {
             }
             Token::RuleDefinition => {
                 let name = lexer.slice().trim_start_matches("rule ").to_string();
+                let mut rule = crate::RuleDefinition {
+                    name,
+                    max_depth: 0,
+                    retirement_rule: None,
+                    weight: 1.0,
+                };
 
-                // TODO: parse rule modifiers
-                lexer
-                    .take_while(|token| !matches!(token, Token::BracketOpen))
-                    .count();
+                while let Ok(token) = self::next(lexer) {
+                    match token {
+                        Token::BracketOpen => break,
+                        Token::MaxDepth => {
+                            fn ret(lexer: &mut crate::Lexer) -> Result<String, ErrorKind> {
+                                let retirement_rule = self::next(lexer)?;
+                                if matches!(retirement_rule, Token::RuleInvocation) {
+                                    Ok(lexer.slice().to_string())
+                                } else {
+                                    Err(ErrorKind::ExpectedIdentifier)
+                                }
+                            }
+
+                            rule.max_depth = {
+                                self::next(lexer)?;
+                                lexer.slice().parse()?
+                            };
+                            let mut temp = lexer.clone();
+                            rule.retirement_rule =
+                                if let Ok(Token::MoreThan) = self::next(&mut temp) {
+                                    std::mem::swap(lexer, &mut temp);
+                                    Some(ret(lexer)?)
+                                } else {
+                                    None
+                                };
+                        }
+                        Token::Weight => {
+                            rule.weight = {
+                                self::next(lexer)?;
+                                std::str::FromStr::from_str(lexer.slice())?
+                            };
+                        }
+                        Token::Error => {}
+                        _ => return Err(ErrorKind::UnexpectedRuleDefinitionToken),
+                    }
+                }
 
                 fn starts_action(token: Token) -> bool {
                     matches!(
@@ -195,8 +237,8 @@ fn build_rules(lexer: &mut crate::Lexer) -> Result<crate::RuleSet, ErrorKind> {
                     )
                 }
 
-                let mut actions = vec![];
                 let mut next = self::next(lexer)?;
+                let mut actions = vec![];
                 while starts_action(next) {
                     let action = parse_action_list(next, lexer)?;
                     actions.push(action);
@@ -205,7 +247,7 @@ fn build_rules(lexer: &mut crate::Lexer) -> Result<crate::RuleSet, ErrorKind> {
                 assert_eq!(Token::BracketClose, next, "{:?}", lexer.span());
                 rules.push(super::Rule {
                     max_depth: 0,
-                    ty: super::RuleType::Custom(super::Custom { name, actions }),
+                    ty: super::RuleType::Custom(super::Custom { rule, actions }),
                 });
             }
             Token::Set => {

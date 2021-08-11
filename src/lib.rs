@@ -36,8 +36,16 @@ impl Primitive {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Custom {
+struct RuleDefinition {
     name: String,
+    max_depth: usize,
+    retirement_rule: Option<String>,
+    weight: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Custom {
+    rule: RuleDefinition,
     actions: Vec<Action>,
 }
 
@@ -60,7 +68,6 @@ impl Custom {
             .flat_map(move |action| {
                 let rule = rules.get(&action.rule).unwrap();
                 let result = action.iter(current_tx).flat_map(move |tx| match &rule.ty {
-
                     RuleType::Primitive(inner) => Box::new(std::iter::once((tx, *inner)))
                         as Box<dyn Iterator<Item = (Transform, Primitive)>>,
                     RuleType::Custom(inner) => Box::new(inner.iter(rules, tx)),
@@ -68,7 +75,7 @@ impl Custom {
                         // TODO: rng state should be passed through iterator
                         let index = rand::Rng::sample(&mut rand::thread_rng(), &inner.weights);
                         Box::new(inner.actions[index].iter(rules, tx))
-                    },
+                    }
                 });
                 result
             })
@@ -99,7 +106,7 @@ impl Rule {
     pub fn name(&self) -> &str {
         match &self.ty {
             RuleType::Primitive(inner) => inner.name(),
-            RuleType::Custom(inner) => &inner.name,
+            RuleType::Custom(inner) => &inner.rule.name,
             RuleType::Ambiguous(inner) => &inner.name,
         }
     }
@@ -137,7 +144,12 @@ impl RuleSet {
 
         Self {
             top_level: Custom {
-                name: "Top Level".to_string(),
+                rule: RuleDefinition {
+                    name: "Top Level".to_string(),
+                    max_depth: 0,
+                    retirement_rule: None,
+                    weight: 1.0,
+                },
                 actions: vec![],
             },
             rules,
@@ -163,14 +175,17 @@ impl RuleSet {
                 }
 
                 let (name, existing) = entry.remove_entry();
+                let actions = vec![assert_custom(existing), assert_custom(rule)];
+                let weights = actions.iter().map(|action| action.rule.weight);
+                let weights = rand_distr::WeightedIndex::new(weights).unwrap();
                 self.rules.insert(
-                    name,
+                    name.clone(),
                     Rule {
                         max_depth: 0,
                         ty: RuleType::Ambiguous(Ambiguous {
-                            name: existing.name().to_string(),
-                            actions: vec![assert_custom(existing), assert_custom(rule)],
-                            weights: rand_distr::WeightedIndex::new([1., 1.]).unwrap()
+                            name,
+                            actions,
+                            weights,
                         }),
                     },
                 );
