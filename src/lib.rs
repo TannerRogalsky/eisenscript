@@ -60,30 +60,36 @@ impl Custom {
             .flat_map(move |action| {
                 let rule = rules.get(&action.rule).unwrap();
                 let result = action.iter(current_tx).flat_map(move |tx| match &rule.ty {
+
                     RuleType::Primitive(inner) => Box::new(std::iter::once((tx, *inner)))
                         as Box<dyn Iterator<Item = (Transform, Primitive)>>,
                     RuleType::Custom(inner) => Box::new(inner.iter(rules, tx)),
-                    RuleType::Ambiguous(_) => unimplemented!(),
+                    RuleType::Ambiguous(inner) => {
+                        // TODO: rng state should be passed through iterator
+                        let index = rand::Rng::sample(&mut rand::thread_rng(), &inner.weights);
+                        Box::new(inner.actions[index].iter(rules, tx))
+                    },
                 });
                 result
             })
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct Ambiguous {
     name: String,
-    actions: Vec<(usize, Custom)>,
+    actions: Vec<Custom>,
+    weights: rand_distr::WeightedIndex<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 enum RuleType {
     Primitive(Primitive),
     Custom(Custom),
     Ambiguous(Ambiguous),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct Rule {
     pub max_depth: usize,
     pub ty: RuleType,
@@ -99,7 +105,7 @@ impl Rule {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RuleSet {
     top_level: Custom,
     rules: RulesMap,
@@ -163,7 +169,8 @@ impl RuleSet {
                         max_depth: 0,
                         ty: RuleType::Ambiguous(Ambiguous {
                             name: existing.name().to_string(),
-                            actions: vec![(0, assert_custom(existing)), (0, assert_custom(rule))],
+                            actions: vec![assert_custom(existing), assert_custom(rule)],
+                            weights: rand_distr::WeightedIndex::new([1., 1.]).unwrap()
                         }),
                     },
                 );

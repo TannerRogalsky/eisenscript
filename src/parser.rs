@@ -142,7 +142,8 @@ fn parse_action_list(token: Token, lexer: &mut crate::Lexer) -> Result<crate::Ac
         let count = match token {
             Token::BracketOpen => 1,
             Token::LiteralInteger => {
-                let count = std::str::FromStr::from_str(lexer.slice()).unwrap();
+                let count = std::str::FromStr::from_str(lexer.slice())?;
+
                 assert_eq!(lexer.next(), Some(Token::Multiply));
                 assert_eq!(lexer.next(), Some(Token::BracketOpen));
                 count
