@@ -45,6 +45,7 @@ impl Custom {
     pub fn iter<'a>(
         &'a self,
         rules: &'a RulesMap,
+        current_tx: Transform,
     ) -> impl Iterator<Item = (Transform, Primitive)> + 'a {
         fn filter(action: &Action) -> Option<&TransformAction> {
             match action {
@@ -58,10 +59,10 @@ impl Custom {
             .filter_map(filter)
             .flat_map(move |action| {
                 let rule = rules.get(&action.rule).unwrap();
-                let result = action.iter().flat_map(move |tx| match &rule.ty {
+                let result = action.iter(current_tx).flat_map(move |tx| match &rule.ty {
                     RuleType::Primitive(inner) => Box::new(std::iter::once((tx, *inner)))
                         as Box<dyn Iterator<Item = (Transform, Primitive)>>,
-                    RuleType::Custom(inner) => Box::new(inner.iter(rules)),
+                    RuleType::Custom(inner) => Box::new(inner.iter(rules, tx)),
                     RuleType::Ambiguous(_) => unimplemented!(),
                 });
                 result
@@ -188,7 +189,7 @@ pub struct RuleSetIterator<'a> {
 impl<'a> RuleSetIterator<'a> {
     pub fn new(rules: &'a RuleSet) -> Self {
         Self {
-            iter: Box::new(rules.top_level.iter(&rules.rules)),
+            iter: Box::new(rules.top_level.iter(&rules.rules, Transform::default())),
         }
     }
 }
@@ -379,13 +380,13 @@ struct TransformAction {
 }
 
 impl TransformAction {
-    pub fn iter(&self) -> TransformActionIter {
+    pub fn iter(&self, tx: Transform) -> TransformActionIter {
         let iter = if self.loops.is_empty() {
-            let iter = std::iter::once_with(|| vec![Transform::default()]);
+            let iter = std::iter::once_with(move || vec![tx]);
             Box::new(iter) as Box<dyn Iterator<Item = Vec<Transform>>>
         } else {
             let iter = self.loops.iter().map(|l| {
-                (1..=l.count).scan(Transform::default(), move |state, _| {
+                (1..=l.count).scan(tx, move |state, _| {
                     *state *= l.transform;
                     Some(*state)
                 })
@@ -447,7 +448,7 @@ mod tests {
             ],
             rule: "".to_string(),
         };
-        let mut cmds = action.iter();
+        let mut cmds = action.iter(Transform::default());
 
         assert_eq!(cmds.next(), Some(Transform::translation(2., 2., 0.)));
         assert_eq!(cmds.next(), Some(Transform::translation(2., 4., 0.)));
@@ -511,6 +512,17 @@ mod tests {
         let tx = tx * Transform::translation(1., 0., 0.) * Transform::rotate_z(45.);
         approx::assert_abs_diff_eq!(cmds.next().unwrap(), tx, epsilon = 0.001);
 
+        assert_eq!(cmds.next(), None);
+    }
+
+    #[test]
+    fn transform_stack() {
+        let parser = Parser::new(crate::Lexer::new("{ x 1 } r1 rule r1 { box }"))
+            .rules()
+            .unwrap();
+        let mut cmds = parser.iter().map(|(tx, _primitive)| tx);
+
+        assert_eq!(cmds.next(), Some(Transform::translation(1., 0., 0.)));
         assert_eq!(cmds.next(), None);
     }
 
