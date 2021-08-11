@@ -188,7 +188,7 @@ fn build_rules(lexer: &mut crate::Lexer) -> Result<crate::RuleSet, ErrorKind> {
                 let name = lexer.slice().trim_start_matches("rule ").to_string();
                 let mut rule = crate::RuleDefinition {
                     name,
-                    max_depth: 0,
+                    max_depth: None,
                     retirement_rule: None,
                     weight: 1.0,
                 };
@@ -206,10 +206,10 @@ fn build_rules(lexer: &mut crate::Lexer) -> Result<crate::RuleSet, ErrorKind> {
                                 }
                             }
 
-                            rule.max_depth = {
+                            rule.max_depth = Some({
                                 self::next(lexer)?;
                                 lexer.slice().parse()?
-                            };
+                            });
                             let mut temp = lexer.clone();
                             rule.retirement_rule =
                                 if let Ok(Token::MoreThan) = self::next(&mut temp) {
@@ -245,10 +245,7 @@ fn build_rules(lexer: &mut crate::Lexer) -> Result<crate::RuleSet, ErrorKind> {
                     next = self::next(lexer)?;
                 }
                 assert_eq!(Token::BracketClose, next, "{:?}", lexer.span());
-                rules.push(super::Rule {
-                    max_depth: 0,
-                    ty: super::RuleType::Custom(super::Custom { rule, actions }),
-                });
+                rules.push(super::Rule::Custom(super::Custom { rule, actions }));
             }
             Token::Set => {
                 let set_type = crate::Lexer::next(lexer).ok_or(ErrorKind::UnexpectedEOF)?;
@@ -308,8 +305,8 @@ mod tests {
             rules
                 .rules
                 .values()
-                .filter(|rule| match &rule.ty {
-                    crate::RuleType::Primitive(_) => false,
+                .filter(|rule| match rule {
+                    crate::Rule::Primitive(_) => false,
                     _ => true,
                 })
                 .count(),

@@ -24,10 +24,11 @@ fn draw(source: &str) -> Result<solstice_2d::DrawList<'static>, eisenscript::Err
         solstice_2d::Color::new(r, g, b, tx.alpha)
     }
 
+    let mut rng: rand::rngs::SmallRng = rand::SeedableRng::seed_from_u64(0);
     use solstice_2d::Draw;
     let mut dl = solstice_2d::DrawList::default();
     dl.set_camera(solstice_2d::Transform3D::translation(0., -2., -5.));
-    for (tx, primitive) in rules.iter() {
+    for (tx, primitive) in rules.iter(&mut rng) {
         use eisenscript::Primitive;
         let geometry = match primitive {
             Primitive::Box => solstice_2d::Box::new(1., 1., 1., 1, 1, 1),

@@ -38,7 +38,7 @@ impl Primitive {
 #[derive(Debug, Clone, PartialEq)]
 struct RuleDefinition {
     name: String,
-    max_depth: usize,
+    max_depth: Option<usize>,
     retirement_rule: Option<String>,
     weight: f32,
 }
@@ -50,11 +50,14 @@ struct Custom {
 }
 
 impl Custom {
-    pub fn iter<'a>(
+    pub fn iter<'a, R>(
         &'a self,
-        rules: &'a RulesMap,
-        current_tx: Transform,
-    ) -> impl Iterator<Item = (Transform, Primitive)> + 'a {
+        ctx: Context<'a>,
+        rng: &'a mut R,
+    ) -> impl Iterator<Item = (Transform, Primitive)> + 'a
+    where
+        R: rand::Rng,
+    {
         fn filter(action: &Action) -> Option<&TransformAction> {
             match action {
                 Action::Set(_) => None,
@@ -62,23 +65,22 @@ impl Custom {
             }
         }
 
-        self.actions
-            .iter()
-            .filter_map(filter)
-            .flat_map(move |action| {
-                let rule = rules.get(&action.rule).unwrap();
-                let result = action.iter(current_tx).flat_map(move |tx| match &rule.ty {
-                    RuleType::Primitive(inner) => Box::new(std::iter::once((tx, *inner)))
-                        as Box<dyn Iterator<Item = (Transform, Primitive)>>,
-                    RuleType::Custom(inner) => Box::new(inner.iter(rules, tx)),
-                    RuleType::Ambiguous(inner) => {
-                        // TODO: rng state should be passed through iterator
-                        let index = rand::Rng::sample(&mut rand::thread_rng(), &inner.weights);
-                        Box::new(inner.actions[index].iter(rules, tx))
-                    }
+        if self.rule.max_depth == Some(ctx.depth) {
+            Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Transform, Primitive)>>
+        } else {
+            let iter = self
+                .actions
+                .iter()
+                .filter_map(filter)
+                .flat_map(move |action| {
+                    let rule = ctx.rules.get(&action.rule).unwrap();
+                    action
+                        .iter(ctx.tx)
+                        .flat_map(|tx| rule.iter(ctx.descend(tx), rng))
+                        .collect::<Vec<_>>()
                 });
-                result
-            })
+            Box::new(iter)
+        }
     }
 }
 
@@ -90,24 +92,56 @@ struct Ambiguous {
 }
 
 #[derive(Debug, Clone)]
-enum RuleType {
+enum Rule {
     Primitive(Primitive),
     Custom(Custom),
     Ambiguous(Ambiguous),
 }
 
-#[derive(Debug, Clone)]
-struct Rule {
-    pub max_depth: usize,
-    pub ty: RuleType,
-}
-
 impl Rule {
     pub fn name(&self) -> &str {
-        match &self.ty {
-            RuleType::Primitive(inner) => inner.name(),
-            RuleType::Custom(inner) => &inner.rule.name,
-            RuleType::Ambiguous(inner) => &inner.name,
+        match self {
+            Rule::Primitive(inner) => inner.name(),
+            Rule::Custom(inner) => &inner.rule.name,
+            Rule::Ambiguous(inner) => &inner.name,
+        }
+    }
+
+    fn iter<R>(&self, ctx: Context, rng: &mut R) -> Vec<(Transform, Primitive)>
+    where
+        R: rand::Rng,
+    {
+        match self {
+            Rule::Primitive(inner) => vec![(ctx.tx, *inner)],
+            Rule::Custom(inner) => inner.iter(ctx, rng).collect(),
+            Rule::Ambiguous(inner) => {
+                let index = rand::Rng::sample(rng, &inner.weights);
+                inner.actions[index].iter(ctx, rng).collect()
+            }
+        }
+    }
+}
+
+struct Context<'a> {
+    tx: Transform,
+    depth: usize,
+    rules: &'a RulesMap,
+}
+
+impl<'a> Context<'a> {
+    fn new(rules: &'a RulesMap) -> Self {
+        Self {
+            tx: Default::default(),
+            depth: 0,
+            rules,
+        }
+    }
+
+    fn descend(&self, tx: Transform) -> Self {
+        Self {
+            depth: self.depth + 1,
+            tx,
+            rules: self.rules,
         }
     }
 }
@@ -131,22 +165,14 @@ impl RuleSet {
             Primitive::Template,
             Primitive::Other,
         ])
-        .map(|p| {
-            (
-                p.name().to_string(),
-                Rule {
-                    max_depth: 0,
-                    ty: RuleType::Primitive(p),
-                },
-            )
-        })
+        .map(|p| (p.name().to_string(), Rule::Primitive(p)))
         .collect();
 
         Self {
             top_level: Custom {
                 rule: RuleDefinition {
                     name: "Top Level".to_string(),
-                    max_depth: 0,
+                    max_depth: None,
                     retirement_rule: None,
                     weight: 1.0,
                 },
@@ -168,8 +194,8 @@ impl RuleSet {
             }
             Entry::Occupied(entry) => {
                 fn assert_custom(rule: Rule) -> Custom {
-                    match rule.ty {
-                        RuleType::Custom(inner) => inner,
+                    match rule {
+                        Rule::Custom(inner) => inner,
                         _ => panic!(),
                     }
                 }
@@ -180,21 +206,18 @@ impl RuleSet {
                 let weights = rand_distr::WeightedIndex::new(weights).unwrap();
                 self.rules.insert(
                     name.clone(),
-                    Rule {
-                        max_depth: 0,
-                        ty: RuleType::Ambiguous(Ambiguous {
-                            name,
-                            actions,
-                            weights,
-                        }),
-                    },
+                    Rule::Ambiguous(Ambiguous {
+                        name,
+                        actions,
+                        weights,
+                    }),
                 );
             }
         }
     }
 
-    pub fn iter(&self) -> RuleSetIterator {
-        RuleSetIterator::new(self)
+    pub fn iter<'a, R: rand::Rng>(&'a self, rng: &'a mut R) -> RuleSetIterator<'a> {
+        RuleSetIterator::new(self, rng)
     }
 }
 
@@ -209,9 +232,10 @@ pub struct RuleSetIterator<'a> {
 }
 
 impl<'a> RuleSetIterator<'a> {
-    pub fn new(rules: &'a RuleSet) -> Self {
+    pub fn new<R: rand::Rng>(rules: &'a RuleSet, rng: &'a mut R) -> Self {
+        let iter = rules.top_level.iter(Context::new(&rules.rules), rng);
         Self {
-            iter: Box::new(rules.top_level.iter(&rules.rules, Transform::default())),
+            iter: Box::new(iter),
         }
     }
 }
@@ -484,7 +508,8 @@ mod tests {
         let rules = Parser::new(crate::Lexer::new("{ x 2 } box"))
             .rules()
             .unwrap();
-        let mut cmds = rules.iter();
+        let mut rng = rand::thread_rng();
+        let mut cmds = rules.iter(&mut rng);
 
         assert_eq!(
             cmds.next(),
@@ -498,7 +523,8 @@ mod tests {
         let parser = Parser::new(crate::Lexer::new("r1 rule r1 { box }"))
             .rules()
             .unwrap();
-        let mut cmds = parser.iter();
+        let mut rng = rand::thread_rng();
+        let mut cmds = parser.iter(&mut rng);
 
         assert_eq!(cmds.next(), Some((Transform::default(), Primitive::Box)));
         assert_eq!(cmds.next(), None);
@@ -511,7 +537,8 @@ mod tests {
 
         let source = format!("{} * {{ h {} }} box", count, delta);
         let parser = Parser::new(crate::Lexer::new(&source)).rules().unwrap();
-        let mut cmds = parser.iter();
+        let mut rng = rand::thread_rng();
+        let mut cmds = parser.iter(&mut rng);
 
         for i in 1..=count {
             assert_eq!(
@@ -527,7 +554,8 @@ mod tests {
         let parser = Parser::new(crate::Lexer::new("2 * { x 1 rz 45 } box"))
             .rules()
             .unwrap();
-        let mut cmds = parser.iter().map(|(tx, _primitive)| tx);
+        let mut rng = rand::thread_rng();
+        let mut cmds = parser.iter(&mut rng).map(|(tx, _primitive)| tx);
 
         let tx = Transform::translation(1., 0., 0.) * Transform::rotate_z(45.);
         approx::assert_abs_diff_eq!(cmds.next().unwrap(), tx, epsilon = 0.001);
@@ -542,7 +570,8 @@ mod tests {
         let parser = Parser::new(crate::Lexer::new("{ x 1 } r1 rule r1 { box }"))
             .rules()
             .unwrap();
-        let mut cmds = parser.iter().map(|(tx, _primitive)| tx);
+        let mut rng = rand::thread_rng();
+        let mut cmds = parser.iter(&mut rng).map(|(tx, _primitive)| tx);
 
         assert_eq!(cmds.next(), Some(Transform::translation(1., 0., 0.)));
         assert_eq!(cmds.next(), None);
@@ -561,6 +590,7 @@ rule r1 {
         let parser = Parser::new(crate::Lexer::new(INPUT));
         let rules = parser.rules().unwrap();
 
-        assert_eq!(rules.iter().count(), 2 * 3 * 4);
+        let mut rng = rand::thread_rng();
+        assert_eq!(rules.iter(&mut rng).count(), 2 * 3 * 4);
     }
 }
