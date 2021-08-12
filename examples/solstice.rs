@@ -1,4 +1,7 @@
-fn draw(source: &str) -> Result<solstice_2d::DrawList<'static>, eisenscript::Error> {
+fn draw<'a>(
+    source: &'a str,
+    assets: &Assets,
+) -> Result<solstice_2d::DrawList<'static>, eisenscript::Error<'a>> {
     let parser = eisenscript::Parser::new(eisenscript::Lexer::new(source));
     let rules = parser.rules()?;
 
@@ -28,6 +31,7 @@ fn draw(source: &str) -> Result<solstice_2d::DrawList<'static>, eisenscript::Err
     use solstice_2d::Draw;
     let mut dl = solstice_2d::DrawList::default();
     dl.set_camera(solstice_2d::Transform3D::translation(0., -2., -5.));
+    dl.set_shader(Some(assets.shader.clone()));
     for (tx, primitive) in rules.iter(&mut rng) {
         use eisenscript::Primitive;
         let geometry = match primitive {
@@ -37,7 +41,20 @@ fn draw(source: &str) -> Result<solstice_2d::DrawList<'static>, eisenscript::Err
         let color = tx_to_color(&tx);
         dl.draw_with_color_and_transform(geometry, color, tx);
     }
+
+    dl.set_shader(Some({
+        let mut shader = assets.plane.clone();
+        shader.send_uniform("near", 0.01);
+        shader.send_uniform("far", 1000.);
+        shader
+    }));
+    dl.draw_with_color(solstice_2d::Plane::new(1., 1., 1, 1), [1., 0., 0., 1.]);
     Ok(dl)
+}
+
+struct Assets {
+    shader: solstice_2d::Shader,
+    plane: solstice_2d::Shader,
 }
 
 fn main() {
@@ -59,11 +76,22 @@ fn main() {
     let mut ctx = solstice_2d::solstice::Context::new(glow_ctx);
     let mut gfx = solstice_2d::Graphics::new(&mut ctx, width, height).unwrap();
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join("src.eis");
+    let root_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let shader = {
+        let src = std::fs::read_to_string(root_path.join("examples").join("main.glsl")).unwrap();
+        solstice_2d::Shader::with(&src, &mut ctx).unwrap()
+    };
+
+    let plane = {
+        let src = std::fs::read_to_string(root_path.join("examples").join("plane.glsl")).unwrap();
+        solstice_2d::Shader::with(&src, &mut ctx).unwrap()
+    };
+
+    let assets = Assets { shader, plane };
+
+    let path = root_path.join("examples").join("src.eis");
     let source = std::fs::read_to_string(&path).unwrap();
-    let mut dl = draw(&source).unwrap_or_else(|err| {
+    let mut dl = draw(&source, &assets).unwrap_or_else(|err| {
         eprintln!("{}", err);
         solstice_2d::DrawList::default()
     });
@@ -102,7 +130,7 @@ fn main() {
             Event::MainEventsCleared => window_ctx.window().request_redraw(),
             Event::RedrawRequested(_) => {
                 if let Ok(src) = tx.try_recv() {
-                    match draw(&src) {
+                    match draw(&src, &assets) {
                         Ok(new_dl) => dl = new_dl,
                         Err(err) => {
                             eprintln!("{}", err);
