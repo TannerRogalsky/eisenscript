@@ -5,38 +5,44 @@
 // 4 * {x 1 h 20} box
 // 2 * { x 1 rz 45 } box
 
-r2
-8 * { y 2 rz 45 } r2
-
-rule r2 {
-	{ x -2 ry 45 } r1
-	{ rx 90 } r1
-	{ x 2 ry -45 } r1
-}
-
-rule r1 w 2 {
-	box
-	{ x 1 h 90 } box
-	{ y 1 h 180 } box
-	{ z 1 h 270 } box
-	{ x 1 y 1 h 225 } box
-}
-
-rule r1 w 4 {
-	box
-}
-
-
-
-// 4 * { y 1 h 40 } r1
 // r2
-// 
-// rule r2 md 3 {
-// 	{ y 1 } r2
-// 	r1
+// 8 * { y 2 rz 45 } r2
+
+// rule r2 {
+// 	{ x -2 ry 45 } r1
+// 	{ rx 90 } r1
+// 	{ x 2 ry -45 } r1
 // }
-// 
-// rule r1 md 4 {
-// 	{ x 1 } r1
+
+// rule r1 w 2 {
+// 	box
+// 	{ x 1 h 90 } box
+// 	{ y 1 h 180 } box
+// 	{ z 1 h 270 } box
+// 	{ x 1 y 1 h 225 } box
+// }
+
+// rule r1 w 4 {
 // 	box
 // }
+
+//4 * { y 1 h 40 } r1
+// r2
+
+// rule r2 md 3 {
+// 	{ y 1 h 40 } r2
+// 	r1
+// }
+
+// rule r1 md 4 {
+// 	{ x 1 h 40 } r1
+// 	box
+// }
+
+// r1
+3 * { y 1 h 40 } r1
+
+rule r1 md 1 {
+	{ x 1 h 40 } r1
+	box
+}

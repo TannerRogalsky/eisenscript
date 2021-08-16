@@ -11,12 +11,13 @@ vec4 pos(mat4 transform_projection, vec4 vertex_position) {
 #endif
 
 #ifdef FRAGMENT
+uniform vec3 lightPos;
+
 vec4 effect(vec4 color, Image texture, vec2 st, vec2 screen_coords) {
     vec3 fdx = vec3( dFdx( vFragPos.x ), dFdx( vFragPos.y ), dFdx( vFragPos.z ) );
     vec3 fdy = vec3( dFdy( vFragPos.x ), dFdy( vFragPos.y ), dFdy( vFragPos.z ) );
     vec3 norm = normalize( cross( fdx, fdy ) );
 
-    vec3 lightPos = vec3(0.);
     // vec3 norm = normalize(vNormal);
     float dist = 1. / distance(lightPos, vFragPos);
     // dist *= dist;

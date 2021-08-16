@@ -1,10 +1,12 @@
 mod lexer;
 mod parser;
+mod transform;
 
 type RulesMap = std::collections::BTreeMap<String, Rule>;
 pub type Lexer<'source> = logos::Lexer<'source, lexer::Token>;
 use itertools::Itertools;
 pub use parser::{Error, ErrorKind, Parser};
+pub use transform::Transform;
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum Primitive {
@@ -50,11 +52,11 @@ struct Custom {
 }
 
 impl Custom {
-    pub fn iter<'a, R>(
+    pub fn iter<'a, 'b: 'a, R>(
         &'a self,
         ctx: Context<'a>,
-        rng: &'a mut R,
-    ) -> impl Iterator<Item = (Transform, Primitive)> + 'a
+        ctx_mut: &'a mut ContextMut<'b, R>,
+    ) -> Box<dyn Iterator<Item = (Transform, Primitive)> + 'a>
     where
         R: rand::Rng,
     {
@@ -65,22 +67,12 @@ impl Custom {
             }
         }
 
-        if self.rule.max_depth == Some(ctx.depth) {
-            Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Transform, Primitive)>>
-        } else {
-            let iter = self
-                .actions
-                .iter()
-                .filter_map(filter)
-                .flat_map(move |action| {
-                    let rule = ctx.rules.get(&action.rule).unwrap();
-                    action
-                        .iter(ctx.tx)
-                        .flat_map(|tx| rule.iter(ctx.descend(tx), rng))
-                        .collect::<Vec<_>>()
-                });
-            Box::new(iter)
-        }
+        let iter = self
+            .actions
+            .iter()
+            .filter_map(filter)
+            .flat_map(move |action| action.execute(&ctx, ctx_mut));
+        Box::new(iter)
     }
 }
 
@@ -107,16 +99,28 @@ impl Rule {
         }
     }
 
-    fn iter<R>(&self, ctx: Context, rng: &mut R) -> Vec<(Transform, Primitive)>
+    pub fn max_depth(&self) -> Option<usize> {
+        match self {
+            Rule::Primitive(_) => None,
+            Rule::Custom(inner) => inner.rule.max_depth,
+            Rule::Ambiguous(_) => None,
+        }
+    }
+
+    fn iter<'a, 'b: 'a, R>(
+        &'a self,
+        ctx: Context<'a>,
+        ctx_mut: &'a mut ContextMut<'b, R>,
+    ) -> Vec<(Transform, Primitive)>
     where
         R: rand::Rng,
     {
         match self {
             Rule::Primitive(inner) => vec![(ctx.tx, *inner)],
-            Rule::Custom(inner) => inner.iter(ctx, rng).collect(),
+            Rule::Custom(inner) => inner.iter(ctx, ctx_mut).collect(),
             Rule::Ambiguous(inner) => {
-                let index = rand::Rng::sample(rng, &inner.weights);
-                inner.actions[index].iter(ctx, rng).collect()
+                let index = rand::Rng::sample(ctx_mut.rng, &inner.weights);
+                inner.actions[index].iter(ctx, ctx_mut).collect()
             }
         }
     }
@@ -142,6 +146,20 @@ impl<'a> Context<'a> {
             depth: self.depth + 1,
             tx,
             rules: self.rules,
+        }
+    }
+}
+
+pub struct ContextMut<'a, R> {
+    rng: &'a mut R,
+    depths: std::collections::BTreeMap<String, usize>,
+}
+
+impl<'a, R> ContextMut<'a, R> {
+    pub fn new(rng: &'a mut R) -> Self {
+        Self {
+            rng,
+            depths: Default::default(),
         }
     }
 }
@@ -216,8 +234,11 @@ impl RuleSet {
         }
     }
 
-    pub fn iter<'a, R: rand::Rng>(&'a self, rng: &'a mut R) -> RuleSetIterator<'a> {
-        RuleSetIterator::new(self, rng)
+    pub fn iter<'a, 'b: 'a, R: rand::Rng>(
+        &'a self,
+        ctx_mut: &'a mut ContextMut<'b, R>,
+    ) -> RuleSetIterator<'a> {
+        RuleSetIterator::new(self, ctx_mut)
     }
 }
 
@@ -232,8 +253,11 @@ pub struct RuleSetIterator<'a> {
 }
 
 impl<'a> RuleSetIterator<'a> {
-    pub fn new<R: rand::Rng>(rules: &'a RuleSet, rng: &'a mut R) -> Self {
-        let iter = rules.top_level.iter(Context::new(&rules.rules), rng);
+    pub fn new<'b: 'a, R: rand::Rng>(
+        rules: &'a RuleSet,
+        ctx_mut: &'a mut ContextMut<'b, R>,
+    ) -> Self {
+        let iter = rules.top_level.iter(Context::new(&rules.rules), ctx_mut);
         Self {
             iter: Box::new(iter),
         }
@@ -245,171 +269,6 @@ impl Iterator for RuleSetIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialOrd, PartialEq)]
-pub struct Transform {
-    tx: nalgebra::Matrix4<f32>,
-
-    pub hue: f32,
-    pub sat: f32,
-    pub brightness: f32,
-    pub alpha: f32,
-}
-
-impl Transform {
-    pub fn translation(x: f32, y: f32, z: f32) -> Transform {
-        Self {
-            tx: nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(x, y, z)),
-            ..Default::default()
-        }
-    }
-
-    pub fn rotate_x(angle: f32) -> Transform {
-        let tx = nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0., 0.5, 0.5))
-            * nalgebra::Matrix4::from_axis_angle(&nalgebra::Vector3::x_axis(), angle.to_radians())
-            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0., -0.5, -0.5));
-        Self {
-            tx,
-            ..Default::default()
-        }
-    }
-
-    pub fn rotate_y(angle: f32) -> Transform {
-        let tx = nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.5, 0., 0.5))
-            * nalgebra::Matrix4::from_axis_angle(&nalgebra::Vector3::y_axis(), angle.to_radians())
-            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(-0.5, 0., -0.5));
-        Self {
-            tx,
-            ..Default::default()
-        }
-    }
-
-    pub fn rotate_z(angle: f32) -> Transform {
-        let tx = nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.5, 0.5, 0.))
-            * nalgebra::Matrix4::from_axis_angle(&nalgebra::Vector3::z_axis(), angle.to_radians())
-            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(-0.5, -0.5, 0.));
-        Self {
-            tx,
-            ..Default::default()
-        }
-    }
-
-    pub fn scale(x: f32, y: f32, z: f32) -> Transform {
-        let tx = nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.5, 0.5, 0.5))
-            * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(x, y, z))
-            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(-0.5, -0.5, -0.5));
-        Self {
-            tx,
-            ..Default::default()
-        }
-    }
-
-    pub fn hsv(hue: f32, sat: f32, brightness: f32) -> Transform {
-        Self {
-            hue,
-            sat,
-            brightness,
-            ..Default::default()
-        }
-    }
-}
-
-impl std::ops::MulAssign for Transform {
-    fn mul_assign(&mut self, rhs: Self) {
-        self.tx *= rhs.tx;
-
-        self.hue += rhs.hue;
-        self.sat *= rhs.sat;
-        self.brightness *= rhs.brightness;
-        self.alpha *= rhs.alpha;
-    }
-}
-
-impl std::ops::Mul for Transform {
-    type Output = Self;
-
-    fn mul(mut self, rhs: Self) -> Self::Output {
-        self *= rhs;
-        self
-    }
-}
-
-impl Default for Transform {
-    fn default() -> Self {
-        Self {
-            tx: nalgebra::Matrix4::identity(),
-            hue: 0.0,
-            sat: 1.0,
-            brightness: 1.0,
-            alpha: 1.0,
-        }
-    }
-}
-
-impl From<Transform> for mint::ColumnMatrix4<f32> {
-    fn from(t: Transform) -> Self {
-        t.tx.into()
-    }
-}
-
-impl From<&Transform> for mint::ColumnMatrix4<f32> {
-    fn from(t: &Transform) -> Self {
-        t.tx.into()
-    }
-}
-
-impl approx::AbsDiffEq for Transform {
-    type Epsilon = f32;
-
-    fn default_epsilon() -> Self::Epsilon {
-        f32::EPSILON
-    }
-
-    fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
-        self.tx.abs_diff_eq(&other.tx, epsilon)
-            && self.hue.abs_diff_eq(&other.hue, epsilon)
-            && self.sat.abs_diff_eq(&other.sat, epsilon)
-            && self.brightness.abs_diff_eq(&other.brightness, epsilon)
-            && self.alpha.abs_diff_eq(&other.alpha, epsilon)
-    }
-}
-
-impl approx::RelativeEq for Transform {
-    fn default_max_relative() -> Self::Epsilon {
-        f32::default_max_relative()
-    }
-
-    fn relative_eq(
-        &self,
-        other: &Self,
-        epsilon: Self::Epsilon,
-        max_relative: Self::Epsilon,
-    ) -> bool {
-        self.tx.relative_eq(&other.tx, epsilon, max_relative)
-            && self.hue.relative_eq(&other.hue, epsilon, max_relative)
-            && self.sat.relative_eq(&other.sat, epsilon, max_relative)
-            && self
-                .brightness
-                .relative_eq(&other.brightness, epsilon, max_relative)
-            && self.alpha.relative_eq(&other.alpha, epsilon, max_relative)
-    }
-}
-
-impl approx::UlpsEq for Transform {
-    fn default_max_ulps() -> u32 {
-        f32::default_max_ulps()
-    }
-
-    fn ulps_eq(&self, other: &Self, epsilon: Self::Epsilon, max_ulps: u32) -> bool {
-        self.tx.ulps_eq(&other.tx, epsilon, max_ulps)
-            && self.hue.ulps_eq(&other.hue, epsilon, max_ulps)
-            && self.sat.ulps_eq(&other.sat, epsilon, max_ulps)
-            && self
-                .brightness
-                .ulps_eq(&other.brightness, epsilon, max_ulps)
-            && self.alpha.ulps_eq(&other.alpha, epsilon, max_ulps)
     }
 }
 
@@ -426,7 +285,7 @@ struct TransformAction {
 }
 
 impl TransformAction {
-    pub fn iter(&self, tx: Transform) -> TransformActionIter {
+    fn iter(&self, tx: Transform) -> TransformActionIter {
         let iter = if self.loops.is_empty() {
             let iter = std::iter::once_with(move || vec![tx]);
             Box::new(iter) as Box<dyn Iterator<Item = Vec<Transform>>>
@@ -440,6 +299,30 @@ impl TransformAction {
             Box::new(itertools::Itertools::multi_cartesian_product(iter))
         };
         TransformActionIter { iter }
+    }
+
+    fn execute<'a, 'b: 'a, R: rand::Rng>(
+        &'a self,
+        ctx: &Context<'a>,
+        ctx_mut: &'a mut ContextMut<'b, R>,
+    ) -> Vec<(Transform, Primitive)> {
+        let rule = ctx.rules.get(&self.rule).unwrap();
+        if let Some(max_depth) = rule.max_depth() {
+            if let Some(current) = ctx_mut.depths.get_mut(rule.name()) {
+                *current = current.saturating_sub(1);
+                if *current == 0 {
+                    ctx_mut.depths.remove(rule.name());
+                    return vec![];
+                }
+            } else {
+                ctx_mut
+                    .depths
+                    .insert(rule.name().to_string(), max_depth - 1);
+            }
+        }
+        self.iter(ctx.tx)
+            .flat_map(|tx| rule.iter(ctx.descend(tx), ctx_mut))
+            .collect::<Vec<_>>()
     }
 }
 
@@ -509,7 +392,8 @@ mod tests {
             .rules()
             .unwrap();
         let mut rng = rand::thread_rng();
-        let mut cmds = rules.iter(&mut rng);
+        let mut ctx = ContextMut::new(&mut rng);
+        let mut cmds = rules.iter(&mut ctx);
 
         assert_eq!(
             cmds.next(),
@@ -524,7 +408,8 @@ mod tests {
             .rules()
             .unwrap();
         let mut rng = rand::thread_rng();
-        let mut cmds = parser.iter(&mut rng);
+        let mut ctx = ContextMut::new(&mut rng);
+        let mut cmds = parser.iter(&mut ctx);
 
         assert_eq!(cmds.next(), Some((Transform::default(), Primitive::Box)));
         assert_eq!(cmds.next(), None);
@@ -538,7 +423,8 @@ mod tests {
         let source = format!("{} * {{ h {} }} box", count, delta);
         let parser = Parser::new(crate::Lexer::new(&source)).rules().unwrap();
         let mut rng = rand::thread_rng();
-        let mut cmds = parser.iter(&mut rng);
+        let mut ctx = ContextMut::new(&mut rng);
+        let mut cmds = parser.iter(&mut ctx);
 
         for i in 1..=count {
             assert_eq!(
@@ -555,7 +441,8 @@ mod tests {
             .rules()
             .unwrap();
         let mut rng = rand::thread_rng();
-        let mut cmds = parser.iter(&mut rng).map(|(tx, _primitive)| tx);
+        let mut ctx = ContextMut::new(&mut rng);
+        let mut cmds = parser.iter(&mut ctx).map(|(tx, _primitive)| tx);
 
         let tx = Transform::translation(1., 0., 0.) * Transform::rotate_z(45.);
         approx::assert_abs_diff_eq!(cmds.next().unwrap(), tx, epsilon = 0.001);
@@ -571,10 +458,89 @@ mod tests {
             .rules()
             .unwrap();
         let mut rng = rand::thread_rng();
-        let mut cmds = parser.iter(&mut rng).map(|(tx, _primitive)| tx);
+        let mut ctx = ContextMut::new(&mut rng);
+        let mut cmds = parser.iter(&mut ctx).map(|(tx, _primitive)| tx);
 
         assert_eq!(cmds.next(), Some(Transform::translation(1., 0., 0.)));
         assert_eq!(cmds.next(), None);
+    }
+
+    #[test]
+    fn recursion() {
+        let parser = Parser::new(crate::Lexer::new(
+            "r1
+            rule r1 md 4 {
+                box
+                { x 1 h 20 } r1
+            }",
+        ))
+        .rules()
+        .unwrap();
+        let mut rng = rand::thread_rng();
+        let mut ctx = ContextMut::new(&mut rng);
+        let cmds = parser.iter(&mut ctx).map(|(tx, _primitive)| tx);
+
+        assert_eq!(cmds.count(), 4);
+    }
+
+    #[test]
+    fn mixed_recursion() {
+        let parser = Parser::new(crate::Lexer::new(
+            r#"
+            2 * { y 1 h 40 } r1
+            rule r1 md 1 {
+	            { x 1 h 40 } r1
+	            box
+            }"#,
+        ))
+        .rules()
+        .unwrap();
+        println!("{:#?}", parser);
+
+        let mut rng = rand::thread_rng();
+        let mut ctx = ContextMut::new(&mut rng);
+
+        let rule = parser.rules.get("r1").unwrap();
+        let rule = match rule {
+            Rule::Custom(inner) => inner,
+            _ => panic!(),
+        };
+        assert_eq!(rule.actions.len(), 2);
+
+        fn filter(action: &Action) -> Option<&TransformAction> {
+            match action {
+                Action::Set(_) => None,
+                Action::Transform(inner) => Some(inner),
+            }
+        }
+
+        let action1 = rule.actions.iter().filter_map(filter).next().unwrap();
+        assert_eq!(action1.rule, "r1");
+        assert_eq!(
+            action1.loops,
+            vec![TransformationLoop {
+                count: 1,
+                transform: Transform::translation(1., 0., 0.) * Transform::hsv(40., 1., 1.)
+            }]
+        );
+        let result = action1.execute(&Context::new(&parser.rules), &mut ctx);
+        assert_eq!(result.len(), 1);
+
+        let result = rule
+            .actions
+            .iter()
+            .filter_map(filter)
+            .flat_map(|action| action.execute(&Context::new(&parser.rules), &mut ctx))
+            .count();
+        assert_eq!(result, 2);
+
+        assert_eq!(
+            parser
+                .top_level
+                .iter(Context::new(&parser.rules), &mut ctx)
+                .count(),
+            4
+        );
     }
 
     #[test]
@@ -591,6 +557,7 @@ rule r1 {
         let rules = parser.rules().unwrap();
 
         let mut rng = rand::thread_rng();
-        assert_eq!(rules.iter(&mut rng).count(), 2 * 3 * 4);
+        let mut ctx = ContextMut::new(&mut rng);
+        assert_eq!(rules.iter(&mut ctx).count(), 2 * 3 * 4);
     }
 }

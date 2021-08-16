@@ -1,6 +1,9 @@
+use glutin::event::DeviceEvent;
+
 fn draw<'a>(
     source: &'a str,
     assets: &Assets,
+    camera: &solstice_2d::Transform3D,
 ) -> Result<solstice_2d::DrawList<'static>, eisenscript::Error<'a>> {
     let parser = eisenscript::Parser::new(eisenscript::Lexer::new(source));
     let rules = parser.rules()?;
@@ -30,9 +33,16 @@ fn draw<'a>(
     let mut rng: rand::rngs::SmallRng = rand::SeedableRng::seed_from_u64(0);
     use solstice_2d::Draw;
     let mut dl = solstice_2d::DrawList::default();
-    dl.set_camera(solstice_2d::Transform3D::translation(0., -2., -5.));
-    dl.set_shader(Some(assets.shader.clone()));
-    for (tx, primitive) in rules.iter(&mut rng) {
+    dl.set_camera(*camera);
+    dl.set_shader(Some({
+        let mut shader = assets.shader.clone();
+        shader.send_uniform(
+            "lightPos",
+            mint::Vector3::from(camera.inverse_transform_point(0., 0., 0.)),
+        );
+        shader
+    }));
+    for (tx, primitive) in rules.iter(&mut eisenscript::ContextMut::new(&mut rng)) {
         use eisenscript::Primitive;
         let geometry = match primitive {
             Primitive::Box => solstice_2d::Box::new(1., 1., 1., 1, 1, 1),
@@ -88,10 +98,11 @@ fn main() {
     };
 
     let assets = Assets { shader, plane };
+    let mut camera = solstice_2d::Transform3D::translation(0., -2., -5.);
 
     let path = root_path.join("examples").join("src.eis");
-    let source = std::fs::read_to_string(&path).unwrap();
-    let mut dl = draw(&source, &assets).unwrap_or_else(|err| {
+    let mut source = std::fs::read_to_string(&path).unwrap();
+    let mut dl = draw(&source, &assets, &camera).unwrap_or_else(|err| {
         eprintln!("{}", err);
         solstice_2d::DrawList::default()
     });
@@ -116,25 +127,126 @@ fn main() {
         .unwrap();
     notify::Watcher::watch(&mut watcher, &path, notify::RecursiveMode::NonRecursive).unwrap();
 
+    #[derive(Default)]
+    struct KeyState {
+        w: bool,
+        a: bool,
+        s: bool,
+        d: bool,
+    }
+    let mut keys = KeyState::default();
+
+    enum MouseButtonState {
+        Up,
+        Down { start: [f32; 2] },
+    }
+    struct MouseState {
+        position: [f32; 2],
+        button: MouseButtonState,
+    }
+    let mut mouse = MouseState {
+        position: [0., 0.],
+        button: MouseButtonState::Up,
+    };
+
     el.run(move |event, _el, cf| {
         use glutin::{
-            event::{Event, WindowEvent},
+            event::{ElementState, Event, KeyboardInput, MouseButton, VirtualKeyCode, WindowEvent},
             event_loop::*,
         };
 
         match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => *cf = ControlFlow::Exit,
+                WindowEvent::MouseInput { state, button, .. } => {
+                    if let MouseButton::Left = button {
+                        match state {
+                            ElementState::Pressed => {
+                                mouse.button = MouseButtonState::Down {
+                                    start: mouse.position,
+                                }
+                            }
+                            ElementState::Released => mouse.button = MouseButtonState::Up,
+                        }
+                    }
+                }
+                WindowEvent::KeyboardInput {
+                    input:
+                        KeyboardInput {
+                            state,
+                            virtual_keycode: Some(virtual_keycode),
+                            ..
+                        },
+                    ..
+                } => {
+                    let pressed = match state {
+                        ElementState::Pressed => true,
+                        ElementState::Released => false,
+                    };
+                    match virtual_keycode {
+                        VirtualKeyCode::W => keys.w = pressed,
+                        VirtualKeyCode::A => keys.a = pressed,
+                        VirtualKeyCode::S => keys.s = pressed,
+                        VirtualKeyCode::D => keys.d = pressed,
+                        _ => {}
+                    }
+                }
+                _ => {}
+            },
+            Event::DeviceEvent { event, .. } => match event {
+                DeviceEvent::MouseMotion { delta: (dx, dy) } => {
+                    let glutin::dpi::PhysicalSize { width, height } =
+                        window_ctx.window().inner_size().cast::<f32>();
+                    let arcball = |x: f32, y: f32| -> [f32; 3] {
+                        let [px, py] = [x / width * 2. - 1., y / height * 2. - 1.];
+                        let py = -py;
+                        let squared = px * px + py * py;
+                        if squared <= 1. {
+                            [px, py, (1. - squared).sqrt()]
+                        } else {
+                            nalgebra::Vector3::new(px, py, 0.).normalize().into()
+                        }
+                    };
+
+                    let [mx, my] = &mut mouse.position;
+                    *mx += dx as f32;
+                    *my += dy as f32;
+
+                    if let MouseButtonState::Down { .. } = &mouse.button {
+                        use solstice_2d::Rad as R;
+                        camera *= solstice_2d::Transform3D::rotation(
+                            R(dx as f32 / 100.),
+                            R(dy as f32 / 100.),
+                            R(0.),
+                        );
+                    }
+                }
                 _ => {}
             },
             Event::MainEventsCleared => window_ctx.window().request_redraw(),
             Event::RedrawRequested(_) => {
                 if let Ok(src) = tx.try_recv() {
-                    match draw(&src, &assets) {
-                        Ok(new_dl) => dl = new_dl,
-                        Err(err) => {
-                            eprintln!("{}", err);
-                        }
+                    source = src;
+                }
+
+                let speed = 1.;
+                if keys.w {
+                    camera *= solstice_2d::Transform3D::translation(0., 0., speed)
+                }
+                if keys.s {
+                    camera *= solstice_2d::Transform3D::translation(0., 0., -speed)
+                }
+                if keys.a {
+                    camera *= solstice_2d::Transform3D::translation(speed, 0., 0.)
+                }
+                if keys.d {
+                    camera *= solstice_2d::Transform3D::translation(-speed, 0., 0.)
+                }
+
+                match draw(&source, &assets, &camera) {
+                    Ok(new_dl) => dl = new_dl,
+                    Err(err) => {
+                        eprintln!("{}", err);
                     }
                 }
 
