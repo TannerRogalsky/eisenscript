@@ -44,6 +44,8 @@ impl std::fmt::Display for Error<'_> {
     }
 }
 
+impl std::error::Error for Error<'_> {}
+
 impl From<std::num::ParseIntError> for ErrorKind {
     fn from(_err: std::num::ParseIntError) -> Self {
         ErrorKind::ExpectedNumber

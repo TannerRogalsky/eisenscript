@@ -1,7 +1,7 @@
 [package]
 name = "eisenscript"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -15,7 +15,7 @@ rand = { version = "0.8", features = ["small_rng"] }
 rand_distr = "0.4"
 
 [dev-dependencies]
-#solstice-2d = "0.2.13"
-solstice-2d = { path = "../solstice/solstice-2d" }
-glutin = "0.27"
-notify = "5.0.0-pre.11"
+solstice-2d = "0.2"
+#solstice-2d = { path = "../solstice/solstice-2d" }
+glutin = "0.28"
+notify = "5.0.0-pre.15"

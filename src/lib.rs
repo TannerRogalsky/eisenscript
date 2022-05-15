@@ -4,7 +4,6 @@ mod transform;
 
 type RulesMap = std::collections::BTreeMap<String, Rule>;
 pub type Lexer<'source> = logos::Lexer<'source, lexer::Token>;
-use itertools::Itertools;
 pub use parser::{Error, ErrorKind, Parser};
 pub use transform::Transform;
 
@@ -172,7 +171,7 @@ pub struct RuleSet {
 
 impl RuleSet {
     pub fn new() -> Self {
-        let rules = std::array::IntoIter::new([
+        let rules = [
             Primitive::Box,
             Primitive::Sphere,
             Primitive::Dot,
@@ -182,7 +181,8 @@ impl RuleSet {
             Primitive::Mesh,
             Primitive::Template,
             Primitive::Other,
-        ])
+        ]
+        .into_iter()
         .map(|p| (p.name().to_string(), Rule::Primitive(p)))
         .collect();
 
@@ -336,7 +336,7 @@ impl Iterator for TransformActionIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         self.iter
             .next()
-            .and_then(|txs| txs.into_iter().fold1(|acc, tx| acc * tx))
+            .and_then(|txs| txs.into_iter().reduce(|acc, tx| acc * tx))
     }
 }
 
